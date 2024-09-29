@@ -24,10 +24,10 @@ class AutonomousSystem:
         self.user_input_queue = Queue()
         self.self_reflection_tasks = set()
         self.next_scheduled_event = None
+        self.sleeping = False  # Initialize sleeping before calling methods that use it
         self.restore_state()
         self.restore_timers()
         self.log('System initialized.')
-        self.sleeping = False
 
     def log(self, entry, debug=False):
         with self.lock:
@@ -73,7 +73,7 @@ class AutonomousSystem:
 
     def set_timer(self, delay, callback, args=()):
         asyncio.create_task(self.schedule_callback(delay, callback.__name__, args))
-        self.next_scheduled_event = datetime.now() + asyncio.timedelta(seconds=delay)
+        self.next_scheduled_event = datetime.now() + timedelta(seconds=delay)
         self.log({
             'type': 'set_timer',
             'delay': delay,
@@ -248,7 +248,7 @@ def main(stdscr):
     log_stream = setup_logging()
 
     # Initialize the Llama model (update the model path as needed)
-    llm = Llama(model_path='model.bin')  # Replace with your model's path
+    llm = Llama(model_path='model.bin')  # Use your model's path
 
     # Initialize the AutonomousSystem
     system = AutonomousSystem(llm, stdscr)
