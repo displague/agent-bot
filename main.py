@@ -7,7 +7,8 @@ import requests
 import curses
 import logging
 import io
-from datetime import datetime, time as dt_time
+import re
+from datetime import datetime, timedelta, time as dt_time
 from llama_cpp import Llama
 from queue import Queue
 
@@ -73,12 +74,14 @@ class AutonomousSystem:
 
     def set_timer(self, delay, callback, args=()):
         asyncio.create_task(self.schedule_callback(delay, callback.__name__, args))
-        self.next_scheduled_event = datetime.now() + timedelta(seconds=delay)
+        event_time = datetime.now() + timedelta(seconds=delay)
+        self.next_scheduled_event = event_time
         self.log({
             'type': 'set_timer',
             'delay': delay,
             'callback': callback.__name__,
             'args': args,
+            'event_time': event_time.strftime('%Y-%m-%d %H:%M:%S'),
             'timestamp': time.time()
         })
 
@@ -111,6 +114,8 @@ class AutonomousSystem:
         self.long_term_goals.append(goal)
         self.log({'type': 'annual_goal', 'goal': goal})
         self.log(f"Annual goal set: {goal}")
+        # Schedule periodic self-evaluation
+        self.set_timer(3600, self.evaluate_progress)  # Evaluate every hour
 
     async def evaluate_progress(self):
         if self.should_sleep():
@@ -124,6 +129,8 @@ class AutonomousSystem:
         self.log(f"Evaluation: {evaluation}")
         if 'adjust' in evaluation.lower():
             await self.adjust_goals(evaluation)
+        # Schedule next evaluation
+        self.set_timer(3600, self.evaluate_progress)
 
     async def adjust_goals(self, evaluation):
         prompt = (f"Based on the evaluation: '{evaluation}', what adjustments should I make "
@@ -142,8 +149,10 @@ class AutonomousSystem:
             batch_inputs = []
             while not self.user_input_queue.empty():
                 user_input = self.user_input_queue.get()
-                batch_inputs.append(user_input)
-            await self.handle_user_inputs(batch_inputs)
+                if user_input.strip():
+                    batch_inputs.append(user_input)
+            if batch_inputs:
+                await self.handle_user_inputs(batch_inputs)
 
     async def handle_user_inputs(self, inputs):
         if self.should_sleep():
@@ -161,6 +170,28 @@ class AutonomousSystem:
             thoughts = response['choices'][0]['text'].strip()
             self.log({'type': 'system_thought', 'thoughts': thoughts})
             self.log(f"System thought: {thoughts}")
+            # Check if a reminder needs to be set
+            await self.check_for_reminders(thoughts)
+
+    async def check_for_reminders(self, text):
+        # Simple regex to find phrases like "in X minutes"
+        match = re.search(r'in (\d+) (minute|minutes|hour|hours)', text, re.IGNORECASE)
+        if match:
+            amount = int(match.group(1))
+            unit = match.group(2).lower()
+            if 'hour' in unit:
+                delay = amount * 3600
+            else:
+                delay = amount * 60
+            self.log(f"Setting a reminder in {amount} {unit}.")
+            self.set_timer(delay, self.reminder_callback)
+        else:
+            self.log("No reminders to set.")
+
+    async def reminder_callback(self):
+        self.log("Reminder: Time to check the latest news.")
+        await self.fetch_world_data()
+        await self.evaluate_progress()
 
     async def monitor_world_events(self):
         while True:
@@ -175,7 +206,6 @@ class AutonomousSystem:
 
     def dynamic_sleep_time(self):
         # Determine sleep duration based on time of day
-        current_hour = datetime.now().hour
         if self.should_sleep():
             return 60 * 60  # Sleep for an hour during sleep time
         else:
@@ -201,11 +231,22 @@ class AutonomousSystem:
         start_line = max(0, len(self.logs) - log_display_height)
         for idx, entry in enumerate(self.logs[start_line:]):
             if isinstance(entry, dict):
+                message_type = entry.get('type')
                 message = entry.get('message') or entry.get('evaluation') or entry.get('goal') \
                           or entry.get('adjustments') or entry.get('input') or entry.get('thoughts') or str(entry)
             else:
+                message_type = 'log'
                 message = str(entry)
-            self.stdscr.addnstr(idx, 0, message, max_x)
+            # Determine color based on message type
+            if message_type == 'user_interaction':
+                color = curses.color_pair(3)
+            elif message_type in ['system_thought', 'evaluation', 'goal_adjustment', 'annual_goal']:
+                color = curses.color_pair(4)
+            elif message_type == 'error':
+                color = curses.color_pair(5)
+            else:
+                color = curses.color_pair(0)  # Default color
+            self.stdscr.addnstr(idx, 0, message, max_x, color)
         # Display debug messages
         if debug_message:
             self.stdscr.addnstr(log_display_height - 1, 0, str(debug_message), max_x, curses.color_pair(2))
@@ -243,6 +284,9 @@ def main(stdscr):
     curses.start_color()
     curses.init_pair(1, curses.COLOR_WHITE, curses.COLOR_BLUE)  # For status bar
     curses.init_pair(2, curses.COLOR_YELLOW, curses.COLOR_BLACK)  # For debug messages
+    curses.init_pair(3, curses.COLOR_CYAN, curses.COLOR_BLACK)  # For user inputs
+    curses.init_pair(4, curses.COLOR_GREEN, curses.COLOR_BLACK)  # For system thoughts
+    curses.init_pair(5, curses.COLOR_RED, curses.COLOR_BLACK)    # For errors
 
     # Setup logging for llama_cpp
     log_stream = setup_logging()
@@ -270,7 +314,7 @@ def main(stdscr):
             stdscr.move(max_y - 1, 7)
             stdscr.clrtoeol()
             user_input = stdscr.getstr().decode('utf-8')
-            if user_input:
+            if user_input.strip():
                 system.user_input_queue.put(user_input)
             system.update_display()
             await asyncio.sleep(0)
