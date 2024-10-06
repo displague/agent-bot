@@ -66,7 +66,6 @@ state = {
 # Create an executor for running blocking LLM calls
 executor = ThreadPoolExecutor(max_workers=5)
 
-
 # Define context manager for capturing stderr during LLM calls
 @contextlib.contextmanager
 def capture_llm_stderr():
@@ -78,12 +77,10 @@ def capture_llm_stderr():
         sys.stderr.close()
         sys.stderr = original_stderr
 
-
 # Indexing system
 def extract_keywords(text):
     # Simple keyword extraction (could use NLP techniques)
     return list(set(text.lower().split()))
-
 
 def index_interaction(entry):
     logger.debug("Indexing interaction")
@@ -96,23 +93,19 @@ def index_interaction(entry):
             index[keyword] = [entry]
     save_index(index)
 
-
 def load_index():
     if os.path.exists(INDEX_PATH):
         with open(INDEX_PATH, "r") as index_file:
             return json.load(index_file)
     return {}
 
-
 def save_index(index):
     with open(INDEX_PATH, "w") as index_file:
         json.dump(index, index_file)
 
-
 def search_context(keyword):
     index = load_index()
     return index.get(keyword.lower(), [])
-
 
 # Event handling
 async def event_scheduler():
@@ -124,7 +117,6 @@ async def event_scheduler():
         except Exception as e:
             logger.error(f"Error in event scheduler: {e}")
         await asyncio.sleep(1)
-
 
 async def handle_event(event):
     event_type = event["type"]
@@ -166,20 +158,16 @@ async def handle_event(event):
         )
     state["next_event"] = "Not scheduled" if event_queue.empty() else "Event pending"
 
-
 async def schedule_event(event):
     logger.debug(f"Scheduling event: {event}")
     await event_queue.put(event)
 
-
 # Helper function for thread-safe interaction_log updates
 interaction_log_lock = asyncio.Lock()
-
 
 async def safe_append_interaction_log(entry):
     async with interaction_log_lock:
         interaction_log.append(entry)
-
 
 # Generate response using Llama model
 async def generate_llama_response(prompt, assistant_private_notes):
@@ -197,6 +185,7 @@ User: {prompt}
 Assistant:"""
         response = await loop.run_in_executor(executor, llm_call, internal_prompt)
         generated_text = response.strip()
+        # Update context, ensuring clear separation between user and assistant responses
         llm_context += f"\nUser: {prompt}\nAssistant: {generated_text}"
         logger.debug(f"Generated response: {generated_text}")
         return generated_text
@@ -204,12 +193,10 @@ Assistant:"""
         logger.error(f"Error generating response from Llama model: {e}")
         return "Error generating response."
 
-
 def llm_call(prompt):
     with llm_lock, capture_llm_stderr():
         response = llm(prompt, max_tokens=150)
         return response["choices"][0]["text"]
-
 
 async def generate_assistant_private_notes(prompt):
     logger.debug("Generating assistant's private notes")
@@ -232,12 +219,10 @@ Assistant's Private Notes (max 30 words):"""
         logger.error(f"Error generating assistant's private notes: {e}")
         return ""
 
-
 def llm_call_private_notes(prompt):
     with llm_lock, capture_llm_stderr():
         response = llm(prompt, max_tokens=100, stop=["\n\n"])
         return response["choices"][0]["text"]
-
 
 def process_private_notes(private_notes, from_assistant=False):
     logger.debug(f"Processing private notes: {private_notes}")
@@ -281,7 +266,6 @@ def process_private_notes(private_notes, from_assistant=False):
                 schedule_event(event), asyncio.get_running_loop()
             )
 
-
 def parse_time(time_str):
     try:
         now = datetime.now()
@@ -294,7 +278,6 @@ def parse_time(time_str):
         return reminder_time
     except ValueError:
         return None
-
 
 # Compress events function
 def compress_events():
@@ -331,7 +314,6 @@ Summary:"""
         )
     except Exception as e:
         logger.error(f"Error in compress_events: {e}")
-
 
 # Curses-based TUI rendering
 async def render_tui(stdscr):
@@ -401,9 +383,19 @@ async def render_tui(stdscr):
         elif key == ord("\t"):
             stdscr.addstr(max_y - 1, 0, "Enter Private Notes: ")
             curses.echo()
-            private_notes = stdscr.getstr(
-                max_y - 1, len("Enter Private Notes: ")
-            ).decode()
+            private_notes = ""
+            while True:
+                note_key = stdscr.getch()
+                if note_key in (curses.KEY_ENTER, 10, 13):
+                    break
+                elif note_key == curses.KEY_BACKSPACE or note_key == 127:
+                    private_notes = private_notes[:-1]
+                    stdscr.addstr(max_y - 1, len("Enter Private Notes: "), " " * (max_x - len("Enter Private Notes: ")))
+                    stdscr.addstr(max_y - 1, len("Enter Private Notes: "), private_notes)
+                elif 32 <= note_key <= 126:
+                    private_notes += chr(note_key)
+                    stdscr.addstr(max_y - 1, len("Enter Private Notes: "), private_notes)
+                stdscr.refresh()
             curses.noecho()
             logger.debug(f"User's Private Notes: {private_notes}")
             process_private_notes(private_notes)
@@ -421,7 +413,6 @@ async def render_tui(stdscr):
                 break
 
         await asyncio.sleep(0.1)
-
 
 # Asynchronous processing of user interactions
 async def process_interactions():
@@ -457,7 +448,6 @@ async def process_interactions():
         except QueueEmpty:
             await asyncio.sleep(1)
 
-
 # Autonomous thought generation
 async def chain_of_thought():
     logger.debug("Starting autonomous thought generation...")
@@ -481,7 +471,6 @@ async def chain_of_thought():
             debug_queue.put(f"Generated thought: {response}")
             await asyncio.sleep(random.uniform(1, 3))
 
-
 # Main entry point
 async def main(stdscr):
     logger.debug("Starting main event loop...")
@@ -495,7 +484,6 @@ async def main(stdscr):
         await asyncio.gather(*tasks, return_exceptions=True)
     except Exception as e:
         logger.error(f"Exception in main: {e}")
-
 
 # Run the program
 if __name__ == "__main__":
