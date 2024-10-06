@@ -12,13 +12,17 @@ import sys
 import os
 from threading import Lock
 import json
-from concurrent.futures import ThreadPoolExecutor  # Added import
+from concurrent.futures import ThreadPoolExecutor
+import contextlib
 
 # Set up logging for debug
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=logging.INFO,  # Adjusted logging level
     format="%(asctime)s - %(levelname)s - %(message)s",
-    handlers=[logging.FileHandler("logs/application.log"), logging.StreamHandler()],
+    handlers=[
+        logging.FileHandler("logs/application.log"),
+        logging.StreamHandler(sys.stdout),  # Ensure logs go to stdout
+    ],
 )
 logger = logging.getLogger("autonomous_system")
 
@@ -33,21 +37,9 @@ COMPRESSED_LOG_PATH = "compressed_logs/compressed_log.jsonl"
 EVENT_QUEUE_PATH = "logs/event_queue.jsonl"
 INDEX_PATH = "index/context_index.json"
 
-# Redirect stderr to capture llama_cpp output
+# Redirect stderr to capture llama_cpp output during model calls
 stderr_fileno = sys.stderr.fileno()
 stderr_backup = os.dup(stderr_fileno)
-stderr_pipe = os.pipe()
-os.dup2(stderr_pipe[1], stderr_fileno)
-
-
-async def capture_stderr():
-    with os.fdopen(stderr_pipe[0]) as stderr_read:
-        while True:
-            line = stderr_read.readline()
-            if line:
-                logger.debug(f"[STDERR] Captured stderr: {line.strip()}")
-                debug_queue.put(f"[STDERR] {line.strip()}")
-            await asyncio.sleep(0.1)
 
 
 # Constants
@@ -74,6 +66,18 @@ state = {
 
 # Create an executor for running blocking LLM calls
 executor = ThreadPoolExecutor(max_workers=5)
+
+
+# Define context manager for capturing stderr during LLM calls
+@contextlib.contextmanager
+def capture_llm_stderr():
+    original_stderr = sys.stderr
+    sys.stderr = open("logs/llm_stderr.log", "w")
+    try:
+        yield
+    finally:
+        sys.stderr.close()
+        sys.stderr = original_stderr
 
 
 # Indexing system
@@ -209,7 +213,7 @@ Assistant:"""
 
 
 def llm_call(prompt):
-    with llm_lock:
+    with llm_lock, capture_llm_stderr():
         response = llm(prompt, max_tokens=150)
         return response["choices"][0]["text"]
 
@@ -219,12 +223,12 @@ async def generate_assistant_private_notes(prompt):
     loop = asyncio.get_event_loop()
     try:
         analysis_prompt = f"""
-As an AI assistant, briefly note any uncertainties or hesitations you have regarding the following user prompt. Do not provide an answer to the user.
+As an AI assistant, briefly note any uncertainties or hesitations you have regarding the following user prompt. Keep it concise and relevant. Do not provide an answer to the user.
 
 User Prompt:
 {prompt}
 
-Assistant's Private Notes (max 50 words):"""
+Assistant's Private Notes (max 30 words):"""
         assistant_private_notes = await loop.run_in_executor(
             executor, llm_call_private_notes, analysis_prompt
         )
@@ -237,7 +241,7 @@ Assistant's Private Notes (max 50 words):"""
 
 
 def llm_call_private_notes(prompt):
-    with llm_lock:
+    with llm_lock, capture_llm_stderr():
         response = llm(prompt, max_tokens=100, stop=["\n\n"])
         return response["choices"][0]["text"]
 
@@ -508,7 +512,6 @@ async def main(stdscr):
         asyncio.create_task(render_tui(stdscr)),
         asyncio.create_task(process_interactions()),
         asyncio.create_task(chain_of_thought()),
-        asyncio.create_task(capture_stderr()),
         asyncio.create_task(event_scheduler()),
     ]
     try:
@@ -530,7 +533,7 @@ if __name__ == "__main__":
         logger.error(f"Unexpected error: {e}")
     finally:
         # Ensure all tasks are canceled
-        pending = asyncio.all_tasks()
+        pending = asyncio.all_tasks(loop=asyncio.get_event_loop())
         for task in pending:
             task.cancel()
         # Wait for tasks to be canceled
