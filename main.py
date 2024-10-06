@@ -191,6 +191,10 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         os.dup2(stderr_backup, stderr_fileno)
         from rich.console import Console
+        console = Console()
+        console.print("
+[red]Shutting down gracefully...[/red]")
+        from rich.console import Console
         os.dup2(stderr_backup, stderr_fileno)
         from rich.console import Console
 
