@@ -27,8 +27,8 @@ async def capture_stderr():
         while True:
             line = stderr_read.readline()
             if line:
-                logger.debug(f"Captured stderr: {line.strip()}")  # Debug statement
-                debug_queue.put(line.strip())
+                logger.debug(f"[STDERR] Captured stderr: {line.strip()}")  # Debug statement
+                debug_queue.put(f"[STDERR] {line.strip()}")
             await asyncio.sleep(0.1)
 
 # Constants
@@ -151,7 +151,7 @@ async def render_tui(stdscr):
             try:
                 interaction = interaction_queue.get_nowait()
                 logger.debug(f"Adding interaction to log: {interaction}")  # Debug statement
-                interaction_log.append(interaction)
+                interaction_log.append(f"Llama: {interaction}")
             except QueueEmpty:
                 break
         
@@ -193,8 +193,8 @@ async def chain_of_thought():
             logger.debug("Generating a new thought")  # Debug statement
             thought_prompt = f"Thought at {datetime.now().strftime('%H:%M:%S')}"
             response = generate_llama_response(thought_prompt)
-            interaction_queue.put(response)
             state["ongoing_thoughts"] += 1
+            interaction_queue.put(response)
             debug_queue.put(f"Generated thought: {response}")
             await asyncio.sleep(random.uniform(1, 3))
 
