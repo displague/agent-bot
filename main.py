@@ -5,14 +5,9 @@ import random
 import logging
 from datetime import datetime
 from queue import Queue, Empty as QueueEmpty
-from rich.console import Console
-from rich.panel import Panel
-from rich.live import Live
-from rich.text import Text
-from rich.table import Table
+import curses
 import requests
 from llama_cpp import Llama
-import curses
 
 # Set up logging for debug
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -28,7 +23,6 @@ llm = Llama(model_path='model.bin')  # Update with the correct model path
 # Queues and state
 interaction_queue = Queue()
 debug_queue = Queue()
-console = Console()
 state = {
     "unprocessed_interactions": 0,
     "ongoing_thoughts": 0,
@@ -62,12 +56,13 @@ def generate_llama_response(prompt):
 # Curses-based TUI rendering
 async def render_tui(stdscr):
     curses.curs_set(1)
-    stdscr.nodelay(False)
+    stdscr.nodelay(True)
     active_screen = 1  # 1 for main screen, 2 for debug screen
 
     input_buffer = ""
     interaction_log = []  # Keep a list of all interactions for scrolling
     debug_log = []  # Keep a list of all debug messages for scrolling
+    scroll_offset = 0
 
     while True:
         stdscr.clear()
@@ -79,14 +74,16 @@ async def render_tui(stdscr):
             stdscr.addstr(0, 0, status_bar[:max_x], curses.A_REVERSE)
             
             # Display thoughts and interactions (scrollable view)
+            display_log = interaction_log[-(max_y - 4 + scroll_offset): -scroll_offset if scroll_offset > 0 else None]
             current_y = 1
-            for interaction in interaction_log[-(max_y - 4):]:
+            for interaction in display_log:
                 stdscr.addstr(current_y, 0, interaction[:max_x])
                 current_y += 1
         elif active_screen == 2:
             # Display debug output (scrollable view)
+            display_log = debug_log[-(max_y - 4 + scroll_offset): -scroll_offset if scroll_offset > 0 else None]
             current_y = 1
-            for debug_message in debug_log[-(max_y - 3):]:
+            for debug_message in display_log:
                 stdscr.addstr(current_y, 0, debug_message[:max_x])
                 current_y += 1
         
@@ -106,6 +103,10 @@ async def render_tui(stdscr):
                 state["unprocessed_interactions"] += 1
                 interaction_log.append(f"You: {input_buffer}")
                 input_buffer = ""
+        elif key == curses.KEY_UP:
+            scroll_offset = min(scroll_offset + 1, len(interaction_log) if active_screen == 1 else len(debug_log))
+        elif key == curses.KEY_DOWN:
+            scroll_offset = max(scroll_offset - 1, 0)
         elif 32 <= key <= 126:  # Printable characters
             input_buffer += chr(key)
         
@@ -171,4 +172,5 @@ if __name__ == "__main__":
     try:
         curses.wrapper(lambda stdscr: asyncio.run(main(stdscr)))
     except KeyboardInterrupt:
+        console = Console()
         console.print("\n[red]Shutting down gracefully...[/red]")
