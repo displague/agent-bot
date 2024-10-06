@@ -26,6 +26,7 @@ async def capture_stderr():
         while True:
             line = stderr_read.readline()
             if line:
+                logger.debug(f"Captured stderr: {line.strip()}")  # Debug statement
                 debug_queue.put(line.strip())
             await asyncio.sleep(0.1)
 
@@ -34,6 +35,7 @@ daily_sleep_start = 23  # 11 PM
 daily_sleep_end = 7  # 7 AM
 
 # Initialize Llama model
+logger.debug("Initializing Llama model...")  # Debug statement
 llm = Llama(model_path='model.bin')  # Update with the correct model path
 
 # Queues and state
@@ -47,6 +49,7 @@ state = {
 
 # External world data fetcher
 def fetch_world_data():
+    logger.debug("Fetching world data...")  # Debug statement
     try:
         response = requests.get('https://www.reddit.com/r/news/top.json?limit=1', headers={'User-agent': 'TUI Bot 0.1'})
         if response.status_code == 200:
@@ -62,15 +65,19 @@ def fetch_world_data():
 
 # Generate response using Llama model
 def generate_llama_response(prompt):
+    logger.debug(f"Generating response for prompt: {prompt}")  # Debug statement
     try:
         response = llm(prompt)
-        return response['choices'][0]['text'].strip()
+        generated_text = response['choices'][0]['text'].strip()
+        logger.debug(f"Generated response: {generated_text}")  # Debug statement
+        return generated_text
     except Exception as e:
         logger.error(f"Error generating response from Llama model: {e}")
         return "Error generating response."
 
 # Curses-based TUI rendering
 async def render_tui(stdscr):
+    logger.debug("Starting TUI rendering...")  # Debug statement
     curses.curs_set(1)
     stdscr.nodelay(True)
     active_screen = 1  # 1 for main screen, 2 for debug screen
@@ -110,11 +117,13 @@ async def render_tui(stdscr):
         # Handle key input to switch screens and handle user input
         key = stdscr.getch()
         if key == 27:  # ESC key to switch screens
+            logger.debug("Switching screen view")  # Debug statement
             active_screen = 2 if active_screen == 1 else 1
         elif key == curses.KEY_BACKSPACE or key == 127:
             input_buffer = input_buffer[:-1]
         elif key in (curses.KEY_ENTER, 10, 13):
             if input_buffer.strip():
+                logger.debug(f"User input: {input_buffer}")  # Debug statement
                 interaction_queue.put(input_buffer)
                 state["unprocessed_interactions"] += 1
                 interaction_log.append(f"You: {input_buffer}")
@@ -130,6 +139,7 @@ async def render_tui(stdscr):
         while not interaction_queue.empty():
             try:
                 interaction = interaction_queue.get_nowait()
+                logger.debug(f"Adding interaction to log: {interaction}")  # Debug statement
                 interaction_log.append(interaction)
             except QueueEmpty:
                 break
@@ -138,6 +148,7 @@ async def render_tui(stdscr):
         while not debug_queue.empty():
             try:
                 debug_message = debug_queue.get_nowait()
+                logger.debug(f"Adding debug message to log: {debug_message}")  # Debug statement
                 debug_log.append(debug_message)
             except QueueEmpty:
                 break
@@ -146,6 +157,7 @@ async def render_tui(stdscr):
 
 # Asynchronous processing of user interactions
 async def process_interactions():
+    logger.debug("Starting interaction processing...")  # Debug statement
     while True:
         try:
             interaction = interaction_queue.get_nowait()
@@ -160,12 +172,14 @@ async def process_interactions():
 
 # Autonomous thought generation
 async def chain_of_thought():
+    logger.debug("Starting autonomous thought generation...")  # Debug statement
     while True:
         current_hour = datetime.now().hour
         if daily_sleep_start <= current_hour or current_hour < daily_sleep_end:
+            logger.debug("System in sleep mode, reducing activity.")  # Debug statement
             await asyncio.sleep(random.uniform(5, 10))  # Less active during sleep hours
         else:
-            logger.debug("Generating a new thought")
+            logger.debug("Generating a new thought")  # Debug statement
             thought_prompt = f"Thought at {datetime.now().strftime('%H:%M:%S')}"
             response = generate_llama_response(thought_prompt)
             interaction_queue.put(response)
@@ -175,6 +189,7 @@ async def chain_of_thought():
 
 # Main entry point
 async def main(stdscr):
+    logger.debug("Starting main event loop...")  # Debug statement
     # Set up tasks for autonomous operation and user interaction processing
     tasks = [
         asyncio.create_task(render_tui(stdscr)),
@@ -187,16 +202,11 @@ async def main(stdscr):
 # Run the program
 if __name__ == "__main__":
     try:
+        logger.debug("Launching TUI application...")  # Debug statement
         curses.wrapper(lambda stdscr: asyncio.run(main(stdscr)))
     except KeyboardInterrupt:
+        logger.debug("KeyboardInterrupt received, shutting down...")  # Debug statement
         os.dup2(stderr_backup, stderr_fileno)
         from rich.console import Console
         console = Console()
-        console.print("
-[red]Shutting down gracefully...[/red]")
-        from rich.console import Console
-        os.dup2(stderr_backup, stderr_fileno)
-        from rich.console import Console
-
-console = Console()
         console.print("\n[red]Shutting down gracefully...[/red]")
