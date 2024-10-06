@@ -8,10 +8,26 @@ from queue import Queue, Empty as QueueEmpty
 import curses
 import requests
 from llama_cpp import Llama
+import sys
+import os
 
 # Set up logging for debug
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("autonomous_system")
+
+# Redirect stderr to capture llama_cpp output
+stderr_fileno = sys.stderr.fileno()
+stderr_backup = os.dup(stderr_fileno)
+stderr_pipe = os.pipe()
+os.dup2(stderr_pipe[1], stderr_fileno)
+
+async def capture_stderr():
+    with os.fdopen(stderr_pipe[0]) as stderr_read:
+        while True:
+            line = stderr_read.readline()
+            if line:
+                debug_queue.put(line.strip())
+            await asyncio.sleep(0.1)
 
 # Constants
 daily_sleep_start = 23  # 11 PM
@@ -164,6 +180,7 @@ async def main(stdscr):
         asyncio.create_task(render_tui(stdscr)),
         asyncio.create_task(process_interactions()),
         asyncio.create_task(chain_of_thought()),
+        asyncio.create_task(capture_stderr()),
     ]
     await asyncio.gather(*tasks)
 
@@ -172,5 +189,6 @@ if __name__ == "__main__":
     try:
         curses.wrapper(lambda stdscr: asyncio.run(main(stdscr)))
     except KeyboardInterrupt:
+        os.dup2(stderr_backup, stderr_fileno)
         console = Console()
         console.print("\n[red]Shutting down gracefully...[/red]")
