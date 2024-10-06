@@ -140,7 +140,7 @@ async def handle_event(event):
         agent_message = (
             f"I've thought more about {topic} and would like to discuss it further."
         )
-        await safe_append_interaction_log(f"\nAgent Response: {agent_message}\n")
+        await safe_append_interaction_log(f"\nAgent Thought: {agent_message}\n")
     elif event_type == "rag_completed":
         logger.debug("Processing RAG completed event")
         message = "RAG processing has completed. Proceeding with training adjustments."
@@ -176,17 +176,17 @@ async def generate_llama_response(prompt, agent_private_notes):
     loop = asyncio.get_running_loop()
     try:
         internal_prompt = f"""
-# Agent's Private Notes:
+# Agent's Reflection:
 {agent_private_notes}
 
 # Conversation:
 {llm_context}
-Input: {prompt}
-Agent Response:"""
+Agent Task: {prompt}
+Agent Thought:"""
         response = await loop.run_in_executor(executor, llm_call, internal_prompt)
         generated_text = response.strip()
         # Update context, ensuring clear separation between user and assistant responses
-        llm_context += f"\nInput: {prompt}\nAgent Response: {generated_text}"
+        llm_context += f"\nAgent Task: {prompt}\nAgent Thought: {generated_text}"
         logger.debug(f"Generated response: {generated_text}")
         return generated_text
     except Exception as e:
@@ -195,7 +195,7 @@ Agent Response:"""
 
 def llm_call(prompt):
     with llm_lock, capture_llm_stderr():
-        response = llm(prompt, max_tokens=150)
+        response = llm(prompt, max_tokens=1000000)
         return response["choices"][0]["text"]
 
 async def generate_agent_private_notes(prompt):
@@ -205,7 +205,7 @@ async def generate_agent_private_notes(prompt):
         analysis_prompt = f"""
 As an AI assistant, briefly note any uncertainties or hesitations you have regarding the following user prompt. Keep it concise and relevant. Do not provide an answer to the user.
 
-User Prompt:
+Context Information:
 {prompt}
 
 Assistant's Private Notes (max 30 words):"""
@@ -221,7 +221,7 @@ Assistant's Private Notes (max 30 words):"""
 
 def llm_call_private_notes(prompt):
     with llm_lock, capture_llm_stderr():
-        response = llm(prompt, max_tokens=100, stop=["\n\n"])
+        response = llm(prompt, max_tokens=10000, stop=["\n\n"])
         return response["choices"][0]["text"]
 
 def process_private_notes(private_notes, from_assistant=False):
@@ -287,10 +287,10 @@ def compress_events():
             logs = [json.loads(line) for line in log_file]
         events_text = ""
         for entry in logs:
-            events_text += f"Input: {entry['user_input']}\n"
+            events_text += f"Agent Task: {entry['user_input']}\n"
             if entry["user_private_notes"]:
                 events_text += f"User's Private Notes: {entry['user_private_notes']}\n"
-            events_text += f"Agent Response: {entry['agent_output']}\n"
+            events_text += f"Agent Thought: {entry['agent_output']}\n"
             if entry["agent_private_notes"]:
                 events_text += (
                     f"Assistant's Private Notes: {entry['agent_private_notes']}\n"
@@ -430,7 +430,7 @@ async def process_interactions():
                 user_input, agent_private_notes
             )
             logger.info(f"Response: {response}")
-            await safe_append_interaction_log(f"Agent Response: {response}")
+            await safe_append_interaction_log(f"Agent Thought: {response}")
             log_entry = {
                 "timestamp": datetime.now().isoformat(),
                 "user_input": user_input,
