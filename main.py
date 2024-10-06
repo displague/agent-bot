@@ -10,9 +10,9 @@ import requests
 from llama_cpp import Llama
 import sys
 import os
-from concurrent.futures import ThreadPoolExecutor
 from threading import Lock
 import json
+from concurrent.futures import ThreadPoolExecutor  # Added import
 
 # Set up logging for debug
 logging.basicConfig(
@@ -72,6 +72,9 @@ state = {
     "next_event": "Not scheduled",
 }
 
+# Create an executor for running blocking LLM calls
+executor = ThreadPoolExecutor(max_workers=5)
+
 
 # Indexing system
 def extract_keywords(text):
@@ -126,7 +129,9 @@ async def handle_event(event):
     if event_type == "reminder":
         assistant_message = event["message"]
         logger.debug(f"Assistant (Reminder): {assistant_message}")
-        interaction_log.append(f"\nAssistant (Reminder): {assistant_message}\n")
+        await safe_append_interaction_log(
+            f"\nAssistant (Reminder): {assistant_message}\n"
+        )
     elif event_type == "lookup":
         keyword = event["keyword"]
         results = search_context(keyword)
@@ -141,7 +146,7 @@ async def handle_event(event):
         assistant_message = (
             f"I've thought more about {topic} and would like to discuss it further."
         )
-        interaction_log.append(f"\nAssistant: {assistant_message}\n")
+        await safe_append_interaction_log(f"\nAssistant: {assistant_message}\n")
     elif event_type == "rag_completed":
         logger.debug("Processing RAG completed event")
         # Schedule training event after a time buffer
@@ -155,7 +160,9 @@ async def handle_event(event):
     elif event_type == "training":
         assistant_message = event["message"]
         logger.debug(f"Assistant (Training): {assistant_message}")
-        interaction_log.append(f"\nAssistant (Training): {assistant_message}\n")
+        await safe_append_interaction_log(
+            f"\nAssistant (Training): {assistant_message}\n"
+        )
         # Implement training logic here
     # Update next event in state
     state["next_event"] = "Not scheduled" if event_queue.empty() else "Event pending"
@@ -166,9 +173,7 @@ async def schedule_event(event):
     await event_queue.put(event)
 
 
-# Create an executor for running blocking LLM calls
-executor = ThreadPoolExecutor(max_workers=5)
-
+# Helper function for thread-safe interaction_log updates
 interaction_log_lock = asyncio.Lock()
 
 
@@ -397,7 +402,7 @@ async def render_tui(stdscr):
                     {"user_input": input_buffer, "user_private_notes": ""}
                 )
                 state["unprocessed_interactions"] += 1
-                interaction_log.append(f"You: {input_buffer}")
+                await safe_append_interaction_log(f"You: {input_buffer}")
                 input_buffer = ""
         elif key == curses.KEY_UP:
             scroll_offset = min(
@@ -422,14 +427,18 @@ async def render_tui(stdscr):
         elif 32 <= key <= 126:  # Printable characters
             input_buffer += chr(key)
 
-        # Add interactions to the log
+        # Add debug messages to the log
+        while not debug_queue.empty():
+            try:
+                debug_message = debug_queue.get_nowait()
+                debug_log.append(debug_message)
+            except QueueEmpty:
+                break
+
         await asyncio.sleep(0.1)
 
 
 # Asynchronous processing of user interactions
-
-
-# Update process_interactions function to be asynchronous
 async def process_interactions():
     logger.debug("Starting interaction processing...")
     while True:
@@ -479,11 +488,15 @@ async def chain_of_thought():
         else:
             logger.debug("Generating a new thought")
             thought_prompt = f"Thought at {datetime.now().strftime('%H:%M:%S')}"
-            assistant_private_notes = generate_assistant_private_notes(thought_prompt)
+            assistant_private_notes = await generate_assistant_private_notes(
+                thought_prompt
+            )
             process_private_notes(assistant_private_notes, from_assistant=True)
-            response = generate_llama_response(thought_prompt, assistant_private_notes)
+            response = await generate_llama_response(
+                thought_prompt, assistant_private_notes
+            )
             state["ongoing_thoughts"] += 1
-            interaction_log.append(f"Assistant Thought: {response}")
+            await safe_append_interaction_log(f"Assistant Thought: {response}")
             debug_queue.put(f"Generated thought: {response}")
             await asyncio.sleep(random.uniform(1, 3))
 
