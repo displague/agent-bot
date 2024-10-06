@@ -10,6 +10,7 @@ import requests
 from llama_cpp import Llama
 import sys
 import os
+from threading import Lock
 
 # Set up logging for debug
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -37,6 +38,10 @@ daily_sleep_end = 7  # 7 AM
 # Initialize Llama model
 logger.debug("Initializing Llama model...")  # Debug statement
 llm = Llama(model_path='model.bin')  # Update with the correct model path
+llm_lock = Lock()
+
+# Shared context for Llama
+llm_context = ""
 
 # Queues and state
 interaction_queue = Queue()
@@ -65,15 +70,21 @@ def fetch_world_data():
 
 # Generate response using Llama model
 def generate_llama_response(prompt):
+    global llm_context
     logger.debug(f"Generating response for prompt: {prompt}")  # Debug statement
-    try:
-        response = llm(prompt)
-        generated_text = response['choices'][0]['text'].strip()
-        logger.debug(f"Generated response: {generated_text}")  # Debug statement
-        return generated_text
-    except Exception as e:
-        logger.error(f"Error generating response from Llama model: {e}")
-        return "Error generating response."
+    with llm_lock:
+        try:
+            # Append the new prompt to the context
+            llm_context += f"\nUser: {prompt}"
+            response = llm(llm_context)
+            generated_text = response['choices'][0]['text'].strip()
+            # Update the context with Llama's response
+            llm_context += f"\nLlama: {generated_text}"
+            logger.debug(f"Generated response: {generated_text}")  # Debug statement
+            return generated_text
+        except Exception as e:
+            logger.error(f"Error generating response from Llama model: {e}")
+            return "Error generating response."
 
 # Curses-based TUI rendering
 async def render_tui(stdscr):
