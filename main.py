@@ -41,7 +41,6 @@ INDEX_PATH = "index/context_index.json"
 stderr_fileno = sys.stderr.fileno()
 stderr_backup = os.dup(stderr_fileno)
 
-
 # Constants
 daily_sleep_start = 23  # 11 PM
 daily_sleep_end = 7  # 7 AM
@@ -143,7 +142,6 @@ async def handle_event(event):
         logger.debug(
             f"Assistant's Private Notes after lookup: {assistant_private_notes}"
         )
-        # Process results or update context as needed
     elif event_type == "deferred_topic":
         topic = event["topic"]
         logger.debug(f"Assistant revisiting deferred topic: {topic}")
@@ -153,7 +151,6 @@ async def handle_event(event):
         await safe_append_interaction_log(f"\nAssistant: {assistant_message}\n")
     elif event_type == "rag_completed":
         logger.debug("Processing RAG completed event")
-        # Schedule training event after a time buffer
         message = "RAG processing has completed. Proceeding with training adjustments."
         training_event = {
             "type": "training",
@@ -167,8 +164,6 @@ async def handle_event(event):
         await safe_append_interaction_log(
             f"\nAssistant (Training): {assistant_message}\n"
         )
-        # Implement training logic here
-    # Update next event in state
     state["next_event"] = "Not scheduled" if event_queue.empty() else "Event pending"
 
 
@@ -190,9 +185,8 @@ async def safe_append_interaction_log(entry):
 async def generate_llama_response(prompt, assistant_private_notes):
     global llm_context
     logger.debug(f"Generating response for prompt: {prompt}")
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     try:
-        # Build internal prompt including private notes
         internal_prompt = f"""
 # Assistant's Private Notes:
 {assistant_private_notes}
@@ -203,7 +197,6 @@ User: {prompt}
 Assistant:"""
         response = await loop.run_in_executor(executor, llm_call, internal_prompt)
         generated_text = response.strip()
-        # Update the context with Llama's response
         llm_context += f"\nUser: {prompt}\nAssistant: {generated_text}"
         logger.debug(f"Generated response: {generated_text}")
         return generated_text
@@ -220,7 +213,7 @@ def llm_call(prompt):
 
 async def generate_assistant_private_notes(prompt):
     logger.debug("Generating assistant's private notes")
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     try:
         analysis_prompt = f"""
 As an AI assistant, briefly note any uncertainties or hesitations you have regarding the following user prompt. Keep it concise and relevant. Do not provide an answer to the user.
@@ -248,22 +241,20 @@ def llm_call_private_notes(prompt):
 
 def process_private_notes(private_notes, from_assistant=False):
     logger.debug(f"Processing private notes: {private_notes}")
-    # Check for triggers in private notes
     if "I should look for previous conversations about" in private_notes:
         keyword = (
             private_notes.split("I should look for previous conversations about")[1]
             .strip()
             .strip(".")
         )
-        # Schedule a lookup event
         event = {"type": "lookup", "keyword": keyword, "trigger_time": datetime.now()}
         asyncio.run_coroutine_threadsafe(
-            schedule_event(event), asyncio.get_event_loop()
+            schedule_event(event), asyncio.get_running_loop()
         )
     if "remind me at" in private_notes:
         parts = private_notes.split("remind me at")
         message = parts[0].strip()
-        time_str = parts[1].strip().split()[0]  # Simplistic parsing
+        time_str = parts[1].strip().split()[0]
         reminder_time = parse_time(time_str)
         if reminder_time:
             event = {
@@ -272,7 +263,7 @@ def process_private_notes(private_notes, from_assistant=False):
                 "trigger_time": reminder_time,
             }
             asyncio.run_coroutine_threadsafe(
-                schedule_event(event), asyncio.get_event_loop()
+                schedule_event(event), asyncio.get_running_loop()
             )
     if "Let's finish this conversation first" in private_notes and from_assistant:
         start = private_notes.find("I'm specifically interested in")
@@ -281,14 +272,13 @@ def process_private_notes(private_notes, from_assistant=False):
             topic = private_notes[
                 start + len("I'm specifically interested in") : end
             ].strip()
-            # Schedule an event to revisit the topic later
             event = {
                 "type": "deferred_topic",
                 "topic": topic,
                 "trigger_time": datetime.now() + timedelta(days=1),
             }
             asyncio.run_coroutine_threadsafe(
-                schedule_event(event), asyncio.get_event_loop()
+                schedule_event(event), asyncio.get_running_loop()
             )
 
 
@@ -335,10 +325,9 @@ Summary:"""
         with open(COMPRESSED_LOG_PATH, "a") as comp_log_file:
             comp_log_file.write(json.dumps(compressed_entry) + "\n")
         logger.info("Event compression completed")
-        # Trigger an event indicating RAG processing has completed
         rag_event = {"type": "rag_completed", "trigger_time": datetime.now()}
         asyncio.run_coroutine_threadsafe(
-            schedule_event(rag_event), asyncio.get_event_loop()
+            schedule_event(rag_event), asyncio.get_running_loop()
         )
     except Exception as e:
         logger.error(f"Error in compress_events: {e}")
@@ -349,12 +338,12 @@ async def render_tui(stdscr):
     logger.debug("Starting TUI rendering...")
     curses.curs_set(1)
     stdscr.nodelay(True)
-    active_screen = 1  # 1 for main screen, 2 for debug screen
+    active_screen = 1
 
     input_buffer = ""
     global interaction_log
-    interaction_log = []  # Keep a list of all interactions for scrolling
-    debug_log = []  # Keep a list of all debug messages for scrolling
+    interaction_log = []
+    debug_log = []
     scroll_offset = 0
 
     while True:
@@ -362,11 +351,8 @@ async def render_tui(stdscr):
         max_y, max_x = stdscr.getmaxyx()
 
         if active_screen == 1:
-            # Draw status bar
             status_bar = f" Unprocessed interactions: {state['unprocessed_interactions']} | Ongoing thoughts: {state['ongoing_thoughts']} | Next event: {state['next_event']} "
             stdscr.addstr(0, 0, status_bar[:max_x], curses.A_REVERSE)
-
-            # Display thoughts and interactions (scrollable view)
             display_log = interaction_log[
                 -(max_y - 4 + scroll_offset) : (
                     -scroll_offset if scroll_offset > 0 else None
@@ -377,7 +363,6 @@ async def render_tui(stdscr):
                 stdscr.addstr(current_y, 0, interaction[:max_x])
                 current_y += 1
         elif active_screen == 2:
-            # Display debug output (scrollable view)
             display_log = debug_log[
                 -(max_y - 4 + scroll_offset) : (
                     -scroll_offset if scroll_offset > 0 else None
@@ -388,13 +373,11 @@ async def render_tui(stdscr):
                 stdscr.addstr(current_y, 0, debug_message[:max_x])
                 current_y += 1
 
-        # Draw input prompt
         stdscr.addstr(max_y - 2, 0, "You: " + input_buffer[: max_x - 5])
         stdscr.refresh()
 
-        # Handle key input to switch screens and handle user input
         key = stdscr.getch()
-        if key == 27:  # ESC key to switch screens
+        if key == 27:
             logger.debug("Switching screen view")
             active_screen = 2 if active_screen == 1 else 1
         elif key == curses.KEY_BACKSPACE or key == 127:
@@ -415,7 +398,7 @@ async def render_tui(stdscr):
             )
         elif key == curses.KEY_DOWN:
             scroll_offset = max(scroll_offset - 1, 0)
-        elif key == ord("\t"):  # Tab key to input private notes
+        elif key == ord("\t"):
             stdscr.addstr(max_y - 1, 0, "Enter Private Notes: ")
             curses.echo()
             private_notes = stdscr.getstr(
@@ -423,15 +406,13 @@ async def render_tui(stdscr):
             ).decode()
             curses.noecho()
             logger.debug(f"User's Private Notes: {private_notes}")
-            # Process private notes
             process_private_notes(private_notes)
             interaction_queue.put(
                 {"user_input": input_buffer, "user_private_notes": private_notes}
             )
-        elif 32 <= key <= 126:  # Printable characters
+        elif 32 <= key <= 126:
             input_buffer += chr(key)
 
-        # Add debug messages to the log
         while not debug_queue.empty():
             try:
                 debug_message = debug_queue.get_nowait()
@@ -451,18 +432,14 @@ async def process_interactions():
             user_input = interaction.get("user_input", "")
             user_private_notes = interaction.get("user_private_notes", "")
             logger.info(f"Processing interaction: {user_input}")
-            # Generate assistant's private notes
             assistant_private_notes = await generate_assistant_private_notes(user_input)
-            # Process user and assistant private notes
             process_private_notes(user_private_notes)
             process_private_notes(assistant_private_notes, from_assistant=True)
-            # Generate assistant's response
             response = await generate_llama_response(
                 user_input, assistant_private_notes
             )
             logger.info(f"Response: {response}")
             await safe_append_interaction_log(f"Assistant: {response}")
-            # Log interaction
             log_entry = {
                 "timestamp": datetime.now().isoformat(),
                 "user_input": user_input,
@@ -476,9 +453,9 @@ async def process_interactions():
             state["unprocessed_interactions"] = max(
                 0, state["unprocessed_interactions"] - 1
             )
-            await asyncio.sleep(random.uniform(0.5, 1.5))  # Simulate processing delay
+            await asyncio.sleep(random.uniform(0.5, 1.5))
         except QueueEmpty:
-            await asyncio.sleep(1)  # Polling interval
+            await asyncio.sleep(1)
 
 
 # Autonomous thought generation
@@ -488,7 +465,7 @@ async def chain_of_thought():
         current_hour = datetime.now().hour
         if daily_sleep_start <= current_hour or current_hour < daily_sleep_end:
             logger.debug("System in sleep mode, reducing activity.")
-            await asyncio.sleep(random.uniform(5, 10))  # Less active during sleep hours
+            await asyncio.sleep(random.uniform(5, 10))
         else:
             logger.debug("Generating a new thought")
             thought_prompt = f"Thought at {datetime.now().strftime('%H:%M:%S')}"
@@ -532,13 +509,11 @@ if __name__ == "__main__":
     except Exception as e:
         logger.error(f"Unexpected error: {e}")
     finally:
-        # Ensure all tasks are canceled
-        pending = asyncio.all_tasks(loop=asyncio.get_event_loop())
+        pending = asyncio.all_tasks(loop=asyncio.get_running_loop())
         for task in pending:
             task.cancel()
-        # Wait for tasks to be canceled
         try:
-            asyncio.get_event_loop().run_until_complete(
+            asyncio.get_running_loop().run_until_complete(
                 asyncio.gather(*pending, return_exceptions=True)
             )
         except Exception as e:
