@@ -190,5 +190,7 @@ if __name__ == "__main__":
         curses.wrapper(lambda stdscr: asyncio.run(main(stdscr)))
     except KeyboardInterrupt:
         os.dup2(stderr_backup, stderr_fileno)
-        console = Console()
+        from rich.console import Console
+
+console = Console()
         console.print("\n[red]Shutting down gracefully...[/red]")
