@@ -85,7 +85,7 @@ def extract_keywords(text):
 def index_interaction(entry):
     logger.debug("Indexing interaction")
     index = load_index()
-    keywords = extract_keywords(entry["user_input"] + " " + entry["agent_output"])
+    keywords = extract_keywords(entry["input"] + " " + entry["output"])
     for keyword in keywords:
         if keyword in index:
             index[keyword].append(entry)
@@ -122,25 +122,23 @@ async def handle_event(event):
     event_type = event["type"]
     logger.info(f"Handling event: {event}")
     if event_type == "reminder":
-        agent_message = event["message"]
-        logger.debug(f"Assistant (Reminder): {agent_message}")
+        message = event["message"]
+        logger.debug(f"Reminder: {message}")
         await safe_append_interaction_log(
-            f"\nAssistant (Reminder): {agent_message}\n"
+            f"\nReminder: {message}\n"
         )
     elif event_type == "lookup":
         keyword = event["keyword"]
         results = search_context(keyword)
-        agent_private_notes = f"Lookup results for '{keyword}': {results}"
-        logger.debug(
-            f"Assistant's Private Notes after lookup: {agent_private_notes}"
-        )
+        notes = f"Lookup results for '{keyword}': {results}"
+        logger.debug(f"Notes after lookup: {notes}")
     elif event_type == "deferred_topic":
         topic = event["topic"]
-        logger.debug(f"Assistant revisiting deferred topic: {topic}")
-        agent_message = (
+        logger.debug(f"Revisiting deferred topic: {topic}")
+        message = (
             f"I've thought more about {topic} and would like to discuss it further."
         )
-        await safe_append_interaction_log(f"\nAgent Thought: {agent_message}\n")
+        await safe_append_interaction_log(f"\nThought: {message}\n")
     elif event_type == "rag_completed":
         logger.debug("Processing RAG completed event")
         message = "RAG processing has completed. Proceeding with training adjustments."
@@ -151,10 +149,10 @@ async def handle_event(event):
         }
         await schedule_event(training_event)
     elif event_type == "training":
-        agent_message = event["message"]
-        logger.debug(f"Assistant (Training): {agent_message}")
+        message = event["message"]
+        logger.debug(f"Training: {message}")
         await safe_append_interaction_log(
-            f"\nAssistant (Training): {agent_message}\n"
+            f"\nTraining: {message}\n"
         )
     state["next_event"] = "Not scheduled" if event_queue.empty() else "Event pending"
 
@@ -170,23 +168,23 @@ async def safe_append_interaction_log(entry):
         interaction_log.append(entry)
 
 # Generate response using Llama model
-async def generate_llama_response(prompt, agent_private_notes):
+async def generate_llama_response(prompt, notes):
     global llm_context
     logger.debug(f"Generating response for prompt: {prompt}")
     loop = asyncio.get_running_loop()
     try:
         internal_prompt = f"""
-# Agent's Reflection:
-{agent_private_notes}
+# Reflection:
+{notes}
 
 # Conversation:
 {llm_context}
-Agent Task: {prompt}
-Agent Thought:"""
+Task: {prompt}
+Thought:"""
         response = await loop.run_in_executor(executor, llm_call, internal_prompt)
         generated_text = response.strip()
-        # Update context, ensuring clear separation between user and assistant responses
-        llm_context += f"\nAgent Task: {prompt}\nAgent Thought: {generated_text}"
+        # Update context, ensuring clear separation between inputs and thoughts
+        llm_context += f"\nTask: {prompt}\nThought: {generated_text}"
         logger.debug(f"Generated response: {generated_text}")
         return generated_text
     except Exception as e:
@@ -195,28 +193,28 @@ Agent Thought:"""
 
 def llm_call(prompt):
     with llm_lock, capture_llm_stderr():
-        response = llm(prompt, max_tokens=1000000)
+        response = llm(prompt, max_tokens=128000)
         return response["choices"][0]["text"]
 
-async def generate_agent_private_notes(prompt):
-    logger.debug("Generating assistant's private notes")
+async def generate_private_notes(prompt):
+    logger.debug("Generating private notes")
     loop = asyncio.get_running_loop()
     try:
         analysis_prompt = f"""
-As an AI assistant, briefly note any uncertainties or hesitations you have regarding the following user prompt. Keep it concise and relevant. Do not provide an answer to the user.
+Note any uncertainties or hesitations regarding the following prompt. Keep it concise and relevant.
 
 Context Information:
 {prompt}
 
-Assistant's Private Notes (max 30 words):"""
-        agent_private_notes = await loop.run_in_executor(
+Notes (max 30 words):"""
+        private_notes = await loop.run_in_executor(
             executor, llm_call_private_notes, analysis_prompt
         )
-        agent_private_notes = agent_private_notes.strip()
-        logger.debug(f"Assistant's Private Notes: {agent_private_notes}")
-        return agent_private_notes
+        private_notes = private_notes.strip()
+        logger.debug(f"Private Notes: {private_notes}")
+        return private_notes
     except Exception as e:
-        logger.error(f"Error generating assistant's private notes: {e}")
+        logger.error(f"Error generating private notes: {e}")
         return ""
 
 def llm_call_private_notes(prompt):
@@ -224,11 +222,11 @@ def llm_call_private_notes(prompt):
         response = llm(prompt, max_tokens=10000, stop=["\n\n"])
         return response["choices"][0]["text"]
 
-def process_private_notes(private_notes, from_assistant=False):
-    logger.debug(f"Processing private notes: {private_notes}")
-    if "I should look for previous conversations about" in private_notes:
+def process_private_notes(notes, from_agent=False):
+    logger.debug(f"Processing private notes: {notes}")
+    if "I should look for previous conversations about" in notes:
         keyword = (
-            private_notes.split("I should look for previous conversations about")[1]
+            notes.split("I should look for previous conversations about")[1]
             .strip()
             .strip(".")
         )
@@ -236,8 +234,8 @@ def process_private_notes(private_notes, from_assistant=False):
         asyncio.run_coroutine_threadsafe(
             schedule_event(event), asyncio.get_running_loop()
         )
-    if "remind me at" in private_notes:
-        parts = private_notes.split("remind me at")
+    if "remind me at" in notes:
+        parts = notes.split("remind me at")
         message = parts[0].strip()
         time_str = parts[1].strip().split()[0]
         reminder_time = parse_time(time_str)
@@ -250,11 +248,11 @@ def process_private_notes(private_notes, from_assistant=False):
             asyncio.run_coroutine_threadsafe(
                 schedule_event(event), asyncio.get_running_loop()
             )
-    if "Let's finish this conversation first" in private_notes and from_assistant:
-        start = private_notes.find("I'm specifically interested in")
-        end = private_notes.find(". Let's finish this conversation first")
+    if "Let's finish this conversation first" in notes and from_agent:
+        start = notes.find("I'm specifically interested in")
+        end = notes.find(". Let's finish this conversation first")
         if start != -1 and end != -1:
-            topic = private_notes[
+            topic = notes[
                 start + len("I'm specifically interested in") : end
             ].strip()
             event = {
@@ -287,14 +285,10 @@ def compress_events():
             logs = [json.loads(line) for line in log_file]
         events_text = ""
         for entry in logs:
-            events_text += f"Agent Task: {entry['user_input']}\n"
-            if entry["user_private_notes"]:
-                events_text += f"User's Private Notes: {entry['user_private_notes']}\n"
-            events_text += f"Agent Thought: {entry['agent_output']}\n"
-            if entry["agent_private_notes"]:
-                events_text += (
-                    f"Assistant's Private Notes: {entry['agent_private_notes']}\n"
-                )
+            events_text += f"Task: {entry['input']}\n"
+            if entry["private_notes"]:
+                events_text += f"Private Notes: {entry['private_notes']}\n"
+            events_text += f"Thought: {entry['output']}\n"
         prompt = f"""Summarize the following interactions, incorporating relevant private notes to improve future training:
 
 {events_text}
@@ -355,7 +349,7 @@ async def render_tui(stdscr):
                 stdscr.addstr(current_y, 0, debug_message[:max_x])
                 current_y += 1
 
-        stdscr.addstr(max_y - 2, 0, "You: " + input_buffer[: max_x - 5])
+        stdscr.addstr(max_y - 2, 0, "Input: " + input_buffer[: max_x - 5])
         stdscr.refresh()
 
         key = stdscr.getch()
@@ -366,12 +360,12 @@ async def render_tui(stdscr):
             input_buffer = input_buffer[:-1]
         elif key in (curses.KEY_ENTER, 10, 13):
             if input_buffer.strip():
-                logger.debug(f"User input: {input_buffer}")
+                logger.debug(f"Input: {input_buffer}")
                 interaction_queue.put(
-                    {"user_input": input_buffer, "user_private_notes": ""}
+                    {"input": input_buffer, "private_notes": ""}
                 )
                 state["unprocessed_interactions"] += 1
-                await safe_append_interaction_log(f"You: {input_buffer}")
+                await safe_append_interaction_log(f"Input: {input_buffer}")
                 input_buffer = ""
         elif key == curses.KEY_UP:
             scroll_offset = min(
@@ -397,10 +391,10 @@ async def render_tui(stdscr):
                     stdscr.addstr(max_y - 1, len("Enter Private Notes: "), private_notes)
                 stdscr.refresh()
             curses.noecho()
-            logger.debug(f"User's Private Notes: {private_notes}")
+            logger.debug(f"Private Notes: {private_notes}")
             process_private_notes(private_notes)
             interaction_queue.put(
-                {"user_input": input_buffer, "user_private_notes": private_notes}
+                {"input": input_buffer, "private_notes": private_notes}
             )
         elif 32 <= key <= 126:
             input_buffer += chr(key)
@@ -414,29 +408,28 @@ async def render_tui(stdscr):
 
         await asyncio.sleep(0.1)
 
-# Asynchronous processing of user interactions
+# Asynchronous processing of inputs
 async def process_interactions():
     logger.debug("Starting interaction processing...")
     while True:
         try:
             interaction = interaction_queue.get_nowait()
-            user_input = interaction.get("user_input", "")
-            user_private_notes = interaction.get("user_private_notes", "")
+            user_input = interaction.get("input", "")
+            user_private_notes = interaction.get("private_notes", "")
             logger.info(f"Processing interaction: {user_input}")
-            agent_private_notes = await generate_agent_private_notes(user_input)
+            private_notes = await generate_private_notes(user_input)
             process_private_notes(user_private_notes)
-            process_private_notes(agent_private_notes, from_assistant=True)
+            process_private_notes(private_notes, from_agent=True)
             response = await generate_llama_response(
-                user_input, agent_private_notes
+                user_input, private_notes
             )
             logger.info(f"Response: {response}")
-            await safe_append_interaction_log(f"Agent Thought: {response}")
+            await safe_append_interaction_log(f"Thought: {response}")
             log_entry = {
                 "timestamp": datetime.now().isoformat(),
-                "user_input": user_input,
-                "user_private_notes": user_private_notes,
-                "agent_output": response,
-                "agent_private_notes": agent_private_notes,
+                "input": user_input,
+                "private_notes": user_private_notes,
+                "output": response,
             }
             with open(HARD_LOG_PATH, "a") as log_file:
                 log_file.write(json.dumps(log_entry) + "\n")
@@ -459,15 +452,15 @@ async def chain_of_thought():
         else:
             logger.debug("Generating a new thought")
             thought_prompt = f"Thought at {datetime.now().strftime('%H:%M:%S')}"
-            agent_private_notes = await generate_agent_private_notes(
+            private_notes = await generate_private_notes(
                 thought_prompt
             )
-            process_private_notes(agent_private_notes, from_assistant=True)
+            process_private_notes(private_notes, from_agent=True)
             response = await generate_llama_response(
-                thought_prompt, agent_private_notes
+                thought_prompt, private_notes
             )
             state["ongoing_thoughts"] += 1
-            await safe_append_interaction_log(f"Agent Thought: {response}")
+            await safe_append_interaction_log(f"Thought: {response}")
             debug_queue.put(f"Generated thought: {response}")
             await asyncio.sleep(random.uniform(1, 3))
 
