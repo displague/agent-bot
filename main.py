@@ -14,6 +14,11 @@ from threading import Lock
 import json
 from concurrent.futures import ThreadPoolExecutor
 import contextlib
+import torch
+import torchaudio
+import sounddevice as sd
+import numpy as np
+from transformers import WhisperProcessor, WhisperModel, AutoTokenizer, AutoModel
 
 # Set up logging for debug
 logging.basicConfig(
@@ -61,6 +66,7 @@ state = {
     "unprocessed_interactions": 0,
     "ongoing_thoughts": 0,
     "next_event": "Not scheduled",
+    "is_sleeping": False  # New state variable
 }
 
 # Create an executor for running blocking LLM calls
@@ -327,7 +333,8 @@ async def render_tui(stdscr):
         max_y, max_x = stdscr.getmaxyx()
 
         if active_screen == 1:
-            status_bar = f" Unprocessed interactions: {state['unprocessed_interactions']} | Ongoing thoughts: {state['ongoing_thoughts']} | Next event: {state['next_event']} "
+            sleep_status = "SLEEPING" if state["is_sleeping"] else "ACTIVE"
+            status_bar = f" Status: {sleep_status} | Unprocessed: {state['unprocessed_interactions']} | Thoughts: {state['ongoing_thoughts']} | Next event: {state['next_event']} "
             stdscr.addstr(0, 0, status_bar[:max_x], curses.A_REVERSE)
             display_log = interaction_log[
                 -(max_y - 4 + scroll_offset) : (
@@ -358,11 +365,23 @@ async def render_tui(stdscr):
             active_screen = 2 if active_screen == 1 else 1
         elif key == curses.KEY_BACKSPACE or key == 127:
             input_buffer = input_buffer[:-1]
+        elif key == ord('v'):  # 'v' key for voice input
+            stdscr.addstr(max_y - 1, 0, "Listening... (Press any key to stop)")
+            stdscr.refresh()
+            audio_thread = threading.Thread(target=lambda: record_audio(duration=5))
+            audio_thread.start()
+            stdscr.getch()  # Wait for any key press
+            audio_thread.join()
+            audio_waveform = record_audio(duration=5)
+            transcribed_text = transcribe_audio(audio_waveform)
+            input_buffer = transcribed_text
+            stdscr.addstr(max_y - 1, 0, " " * (max_x - 1))  # Clear the listening message
+            stdscr.addstr(max_y - 2, 0, "Input: " + input_buffer[:max_x - 5])
         elif key in (curses.KEY_ENTER, 10, 13):
             if input_buffer.strip():
                 logger.debug(f"Input: {input_buffer}")
                 interaction_queue.put(
-                    {"input": input_buffer, "private_notes": ""}
+                    {"input": input_buffer, "private_notes": "", "audio_waveform": audio_waveform}
                 )
                 state["unprocessed_interactions"] += 1
                 await safe_append_interaction_log(f"Input: {input_buffer}")
@@ -394,7 +413,7 @@ async def render_tui(stdscr):
             logger.debug(f"Private Notes: {private_notes}")
             process_private_notes(private_notes)
             interaction_queue.put(
-                {"input": input_buffer, "private_notes": private_notes}
+                {"input": input_buffer, "private_notes": private_notes, "audio_waveform": audio_waveform}
             )
         elif 32 <= key <= 126:
             input_buffer += chr(key)
@@ -416,13 +435,21 @@ async def process_interactions():
             interaction = interaction_queue.get_nowait()
             user_input = interaction.get("input", "")
             user_private_notes = interaction.get("private_notes", "")
+            audio_waveform = interaction.get("audio_waveform", None)
+            
             logger.info(f"Processing interaction: {user_input}")
+            
+            text_features = extract_text_features(user_input)
+            if audio_waveform is not None:
+                audio_features = extract_audio_features(audio_waveform)
+                # Combine text and audio features here if needed
+            
             private_notes = await generate_private_notes(user_input)
             process_private_notes(user_private_notes)
             process_private_notes(private_notes, from_agent=True)
-            response = await generate_llama_response(
-                user_input, private_notes
-            )
+            
+            response = await generate_llama_response(user_input, private_notes)
+            
             logger.info(f"Response: {response}")
             await safe_append_interaction_log(f"Thought: {response}")
             log_entry = {
@@ -448,8 +475,10 @@ async def chain_of_thought():
         current_hour = datetime.now().hour
         if daily_sleep_start <= current_hour or current_hour < daily_sleep_end:
             logger.debug("System in sleep mode, reducing activity.")
+            state["is_sleeping"] = True  # Update sleep state
             await asyncio.sleep(random.uniform(5, 10))
         else:
+            state["is_sleeping"] = False  # Update sleep state
             logger.debug("Generating a new thought")
             thought_prompt = f"Thought at {datetime.now().strftime('%H:%M:%S')}"
             private_notes = await generate_private_notes(
