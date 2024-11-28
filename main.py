@@ -45,6 +45,7 @@ INDEX_PATH = "index/context_index.json"
 # Redirect stderr to capture llama_cpp output during model calls
 stderr_fileno = sys.stderr.fileno()
 stderr_backup = os.dup(stderr_fileno)
+original_stderr = sys.stderr
 
 # Constants
 daily_sleep_start = 23  # 11 PM
@@ -57,6 +58,11 @@ llm_lock = Lock()
 
 # Shared context for Llama
 llm_context = ""
+
+interaction_log = []
+
+# Helper function for thread-safe interaction_log updates
+interaction_log_lock = asyncio.Lock()
 
 # Queues and state
 interaction_queue = Queue()
@@ -72,16 +78,56 @@ state = {
 # Create an executor for running blocking LLM calls
 executor = ThreadPoolExecutor(max_workers=5)
 
+def record_audio(duration=5, sample_rate=16000):
+    logger.debug("Recording audio...")
+    audio_data = sd.rec(int(duration * sample_rate), samplerate=sample_rate, channels=1)
+    sd.wait()
+    waveform = torch.from_numpy(audio_data.flatten())
+    logger.debug("Audio recording completed.")
+    return waveform
+
+def transcribe_audio(audio_waveform, sample_rate=16000):
+    logger.debug("Transcribing audio...")
+    # Load the Whisper model and processor
+    processor = WhisperProcessor.from_pretrained("openai/whisper-small")
+    model = WhisperModel.from_pretrained("openai/whisper-small")
+    model.eval()
+
+    # Prepare the audio input
+    input_features = processor(audio_waveform, sampling_rate=sample_rate, return_tensors="pt").input_features
+
+    # Generate transcription
+    with torch.no_grad():
+        predicted_ids = model.generate(input_features)
+    transcription = processor.decode(predicted_ids[0])
+    logger.debug(f"Transcription result: {transcription}")
+    return transcription
+
+def extract_text_features(text):
+    # Placeholder for text feature extraction
+    logger.debug("Extracting text features...")
+    # Implement your text feature extraction logic here
+    return {}
+
+def extract_audio_features(audio_waveform):
+    # Placeholder for audio feature extraction
+    logger.debug("Extracting audio features...")
+    # Implement your audio feature extraction logic here
+    return {}
+
 # Define context manager for capturing stderr during LLM calls
 @contextlib.contextmanager
 def capture_llm_stderr():
-    original_stderr = sys.stderr
-    sys.stderr = open("logs/llm_stderr.log", "w")
-    try:
-        yield
-    finally:
-        sys.stderr.close()
-        sys.stderr = original_stderr
+    stderr_fd = sys.stderr.fileno()
+    with open("logs/llm_stderr.log", "w") as f:
+        old_stderr = os.dup(stderr_fd)
+        os.dup2(f.fileno(), stderr_fd)
+        try:
+            yield
+        finally:
+            os.dup2(old_stderr, stderr_fd)
+            os.close(old_stderr)
+            sys.stderr = original_stderr
 
 # Indexing system
 def extract_keywords(text):
@@ -166,10 +212,8 @@ async def schedule_event(event):
     logger.debug(f"Scheduling event: {event}")
     await event_queue.put(event)
 
-# Helper function for thread-safe interaction_log updates
-interaction_log_lock = asyncio.Lock()
-
 async def safe_append_interaction_log(entry):
+    global interaction_log
     async with interaction_log_lock:
         interaction_log.append(entry)
 
@@ -199,7 +243,12 @@ Thought:"""
 
 def llm_call(prompt):
     with llm_lock, capture_llm_stderr():
-        response = llm(prompt, max_tokens=128000)
+        response = llm(prompt, max_tokens=512, stop=["\n\n"])
+        return response["choices"][0]["text"]
+
+def llm_call_private_notes(prompt):
+    with llm_lock, capture_llm_stderr():
+        response = llm(prompt, max_tokens=150, stop=["\n\n"])
         return response["choices"][0]["text"]
 
 async def generate_private_notes(prompt):
@@ -222,11 +271,6 @@ Notes (max 30 words):"""
     except Exception as e:
         logger.error(f"Error generating private notes: {e}")
         return ""
-
-def llm_call_private_notes(prompt):
-    with llm_lock, capture_llm_stderr():
-        response = llm(prompt, max_tokens=10000, stop=["\n\n"])
-        return response["choices"][0]["text"]
 
 def process_private_notes(notes, from_agent=False):
     logger.debug(f"Processing private notes: {notes}")
@@ -324,7 +368,6 @@ async def render_tui(stdscr):
 
     input_buffer = ""
     global interaction_log
-    interaction_log = []
     debug_log = []
     scroll_offset = 0
 
@@ -336,14 +379,11 @@ async def render_tui(stdscr):
             sleep_status = "SLEEPING" if state["is_sleeping"] else "ACTIVE"
             status_bar = f" Status: {sleep_status} | Unprocessed: {state['unprocessed_interactions']} | Thoughts: {state['ongoing_thoughts']} | Next event: {state['next_event']} "
             stdscr.addstr(0, 0, status_bar[:max_x], curses.A_REVERSE)
-            display_log = interaction_log[
-                -(max_y - 4 + scroll_offset) : (
-                    -scroll_offset if scroll_offset > 0 else None
-                )
-            ]
+            # Display ongoing thoughts
+            current_thoughts = state.get("current_thoughts", [])
             current_y = 1
-            for interaction in display_log:
-                stdscr.addstr(current_y, 0, interaction[:max_x])
+            for thought in current_thoughts:
+                stdscr.addstr(current_y, 0, f"Thought: {thought[:max_x]}")
                 current_y += 1
         elif active_screen == 2:
             display_log = debug_log[
@@ -475,37 +515,53 @@ async def chain_of_thought():
         current_hour = datetime.now().hour
         if daily_sleep_start <= current_hour or current_hour < daily_sleep_end:
             logger.debug("System in sleep mode, reducing activity.")
-            state["is_sleeping"] = True  # Update sleep state
+            state["is_sleeping"] = True
             await asyncio.sleep(random.uniform(5, 10))
         else:
-            state["is_sleeping"] = False  # Update sleep state
-            logger.debug("Generating a new thought")
-            thought_prompt = f"Thought at {datetime.now().strftime('%H:%M:%S')}"
-            private_notes = await generate_private_notes(
-                thought_prompt
-            )
-            process_private_notes(private_notes, from_agent=True)
-            response = await generate_llama_response(
-                thought_prompt, private_notes
-            )
-            state["ongoing_thoughts"] += 1
-            await safe_append_interaction_log(f"Thought: {response}")
-            debug_queue.put(f"Generated thought: {response}")
+            state["is_sleeping"] = False
+            logger.debug("Generating new thoughts")
+            # Spawn multiple thought tasks
+            thought_tasks = []
+            for _ in range(3):  # Number of simultaneous thoughts
+                thought_tasks.append(asyncio.create_task(generate_thought()))
+            await asyncio.gather(*thought_tasks)
             await asyncio.sleep(random.uniform(1, 3))
+
+async def generate_thought():
+    thought_prompt = f"Thought at {datetime.now().strftime('%H:%M:%S')}"
+    private_notes = await generate_private_notes(thought_prompt)
+    process_private_notes(private_notes, from_agent=True)
+    response = await generate_llama_response(thought_prompt, private_notes)
+    state["ongoing_thoughts"] += 1
+    state.setdefault("current_thoughts", []).append(response)
+    await safe_append_interaction_log(f"Thought: {response}")
+    debug_queue.put(f"Generated thought: {response}")
+
+async def periodic_event_compression():
+    logger.debug("Starting periodic event compression...")
+    while True:
+        compress_events()
+        await asyncio.sleep(3600)  # Run every hour
 
 # Main entry point
 async def main(stdscr):
+    loop = asyncio.get_running_loop()  # Store the event loop
     logger.debug("Starting main event loop...")
     tasks = [
         asyncio.create_task(render_tui(stdscr)),
         asyncio.create_task(process_interactions()),
         asyncio.create_task(chain_of_thought()),
         asyncio.create_task(event_scheduler()),
+        asyncio.create_task(periodic_event_compression()),
     ]
     try:
         await asyncio.gather(*tasks, return_exceptions=True)
     except Exception as e:
         logger.error(f"Exception in main: {e}")
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 # Run the program
 if __name__ == "__main__":
@@ -519,6 +575,8 @@ if __name__ == "__main__":
     except Exception as e:
         logger.error(f"Unexpected error: {e}")
     finally:
+        sys.stderr = original_stderr
+        sys.exit(0)
         pending = asyncio.all_tasks(loop=asyncio.get_running_loop())
         for task in pending:
             task.cancel()
