@@ -18,8 +18,9 @@ import torch
 import torchaudio
 import sounddevice as sd
 import numpy as np
-from transformers import WhisperProcessor, WhisperModel, AutoTokenizer, AutoModel
+from transformers import WhisperProcessor, WhisperModel
 import textwrap  # Added for text wrapping
+import math  # Added for token estimation
 
 # Set up logging for debug
 logging.basicConfig(
@@ -62,6 +63,8 @@ class LlamaModelManager:
         self.llm_lock = Lock()
         self.llm_context = []
         self.context_limit = 512  # Maximum tokens for context
+        # Assuming 0.75 average tokens per word (this is an estimate)
+        self.token_estimate_per_word = 0.75
 
     @contextlib.contextmanager
     def capture_llm_stderr(self):
@@ -91,9 +94,16 @@ class LlamaModelManager:
         self.llm_context.append(new_entry)
         # Estimate token count and truncate context if necessary
         context_str = "\n".join(self.llm_context)
-        while len(context_str.split()) > self.context_limit:
+        total_tokens = self.estimate_token_count(context_str)
+        while total_tokens > self.context_limit:
             self.llm_context.pop(0)
             context_str = "\n".join(self.llm_context)
+            total_tokens = self.estimate_token_count(context_str)
+
+    def estimate_token_count(self, text):
+        # Use the Llama tokenizer to get accurate token count
+        tokens = self.llm.tokenize(text.encode('utf-8'))
+        return len(tokens)
 
     async def generate_llama_response(self, prompt, notes):
         logger.debug(f"Generating response for prompt: {prompt}")
@@ -112,6 +122,22 @@ class LlamaModelManager:
 # Conversation:
 {context_str}
 Thought:"""
+            # Check total tokens to prevent exceeding context window
+            total_tokens = self.estimate_token_count(internal_prompt)
+            if total_tokens > self.context_limit:
+                # Trim context further if necessary
+                while total_tokens > self.context_limit and self.llm_context:
+                    self.llm_context.pop(0)
+                    context_str = "\n".join(self.llm_context)
+                    internal_prompt = f"""
+# Reflection:
+{notes}
+
+# Conversation:
+{context_str}
+Thought:"""
+                    total_tokens = self.estimate_token_count(internal_prompt)
+
             response = await loop.run_in_executor(executor, self.llm_call, internal_prompt)
             generated_text = response.strip()
             # Update context with the generated thought
@@ -179,7 +205,7 @@ class IndexManager:
     def index_interaction(self, entry):
         logger.debug("Indexing interaction")
         index = self.load_index()
-        keywords = self.extract_keywords(entry["input"] + " " + entry["output"])
+        keywords = self.extract_keywords(entry.get("input", "") + " " + entry.get("output", ""))
         for keyword in keywords:
             if keyword in index:
                 index[keyword].append(entry)
@@ -280,20 +306,20 @@ class TUIRenderer:
             for thought in current_thoughts:
                 wrapped_thought = textwrap.wrap(f"Thought: {thought}", max_x)
                 for line in wrapped_thought:
-                    if current_y >= max_y - 2:
+                    if current_y >= max_y - 3:
                         break
                     self.stdscr.addstr(current_y, 0, line)
                     current_y += 1
 
             # Display interaction log
-            max_log_lines = max_y - current_y - 2
+            max_log_lines = max_y - current_y - 3
             display_log = await self.interaction_log_manager.get_display_log(max_log_lines, self.scroll_offset)
             for interaction in display_log:
-                if current_y >= max_y - 2:
+                if current_y >= max_y - 3:
                     break
                 wrapped_interaction = textwrap.wrap(interaction, max_x)
                 for line in wrapped_interaction:
-                    if current_y >= max_y - 2:
+                    if current_y >= max_y - 3:
                         break
                     self.stdscr.addstr(current_y, 0, line)
                     current_y += 1
@@ -305,12 +331,13 @@ class TUIRenderer:
             for debug_message in display_log:
                 wrapped_debug = textwrap.wrap(debug_message, max_x)
                 for line in wrapped_debug:
-                    if current_y >= max_y - 2:
+                    if current_y >= max_y - 3:
                         break
                     self.stdscr.addstr(current_y, 0, line)
                     current_y += 1
 
-        self.stdscr.addstr(max_y - 2, 0, "Input: " + self.input_buffer[: max_x - 5])
+        self.stdscr.addstr(max_y - 2, 0, "Input: " + self.input_buffer[: max_x - 7])
+        self.stdscr.clrtoeol()
         self.stdscr.refresh()
 
         key = self.stdscr.getch()
@@ -321,6 +348,7 @@ class TUIRenderer:
             self.input_buffer = self.input_buffer[:-1]
         elif key == ord("v"):  # 'v' key for voice input
             self.stdscr.addstr(max_y - 1, 0, "Listening... (Press any key to stop)")
+            self.stdscr.clrtoeol()
             self.stdscr.refresh()
             audio_recorder = AudioRecorder(duration=5)
             audio_recorder.start()
@@ -337,7 +365,8 @@ class TUIRenderer:
             else:
                 self.input_buffer = ""
             self.stdscr.addstr(max_y - 1, 0, " " * (max_x - 1))  # Clear the listening message
-            self.stdscr.addstr(max_y - 2, 0, "Input: " + self.input_buffer[: max_x - 5])
+            self.stdscr.addstr(max_y - 2, 0, "Input: " + self.input_buffer[: max_x - 7])
+            self.stdscr.clrtoeol()
         elif key in (curses.KEY_ENTER, 10, 13):
             if self.input_buffer.strip():
                 logger.debug(f"Input: {self.input_buffer}")
@@ -360,6 +389,7 @@ class TUIRenderer:
             self.scroll_offset = max(self.scroll_offset - 1, 0)
         elif key == ord("\t"):
             self.stdscr.addstr(max_y - 1, 0, "Enter Private Notes: ")
+            self.stdscr.clrtoeol()
             curses.echo()
             private_notes = ""
             while True:
@@ -381,6 +411,7 @@ class TUIRenderer:
                     self.stdscr.addstr(
                         max_y - 1, len("Enter Private Notes: "), private_notes
                     )
+                self.stdscr.clrtoeol()
                 self.stdscr.refresh()
             curses.noecho()
             logger.debug(f"Private Notes: {private_notes}")
@@ -388,6 +419,8 @@ class TUIRenderer:
             # ...
         elif 32 <= key <= 126:
             self.input_buffer += chr(key)
+            self.stdscr.addstr(max_y - 2, 0, "Input: " + self.input_buffer[: max_x - 7])
+            self.stdscr.clrtoeol()
 
         while not self.debug_queue.empty():
             try:
@@ -555,14 +588,23 @@ class EventCompressor:
     async def compress_events(self):
         logger.debug("Starting event compression")
         try:
+            if not os.path.exists(HARD_LOG_PATH):
+                logger.debug("No logs to compress.")
+                return
             with open(HARD_LOG_PATH, "r") as log_file:
-                logs = [json.loads(line) for line in log_file]
+                logs = [json.loads(line) for line in log_file if line.strip()]
             events_text = ""
             for entry in logs:
-                events_text += f"Task: {entry['input']}\n"
-                if entry["private_notes"]:
-                    events_text += f"Private Notes: {entry['private_notes']}\n"
-                events_text += f"Thought: {entry['output']}\n"
+                input_text = entry.get('input', '')
+                output_text = entry.get('output', '')
+                private_notes = entry.get('private_notes', '')
+                events_text += f"Task: {input_text}\n"
+                if private_notes:
+                    events_text += f"Private Notes: {private_notes}\n"
+                events_text += f"Thought: {output_text}\n"
+            if not events_text.strip():
+                logger.debug("No events to compress.")
+                return
             prompt = f"""Summarize the following interactions, incorporating relevant private notes to improve future training:
 
 {events_text}
