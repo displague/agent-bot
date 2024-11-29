@@ -19,6 +19,7 @@ import torchaudio
 import sounddevice as sd
 import numpy as np
 from transformers import WhisperProcessor, WhisperModel, AutoTokenizer, AutoModel
+import textwrap  # Added for text wrapping
 
 # Set up logging for debug
 logging.basicConfig(
@@ -59,7 +60,8 @@ class LlamaModelManager:
         logger.debug("Initializing Llama model...")
         self.llm = Llama(model_path=model_path)
         self.llm_lock = Lock()
-        self.llm_context = ""
+        self.llm_context = []
+        self.context_limit = 512  # Maximum tokens for context
 
     @contextlib.contextmanager
     def capture_llm_stderr(self):
@@ -84,22 +86,36 @@ class LlamaModelManager:
             response = self.llm(prompt, max_tokens=150, stop=["\n\n"])
             return response["choices"][0]["text"]
 
+    def update_context(self, new_entry):
+        # Limit the context to avoid exceeding the context window
+        self.llm_context.append(new_entry)
+        # Estimate token count and truncate context if necessary
+        context_str = "\n".join(self.llm_context)
+        while len(context_str.split()) > self.context_limit:
+            self.llm_context.pop(0)
+            context_str = "\n".join(self.llm_context)
+
     async def generate_llama_response(self, prompt, notes):
         logger.debug(f"Generating response for prompt: {prompt}")
         loop = asyncio.get_running_loop()
         try:
+            # Update context before generating the prompt
+            self.update_context(f"Task: {prompt}")
+
+            # Prepare context string
+            context_str = "\n".join(self.llm_context)
+
             internal_prompt = f"""
 # Reflection:
 {notes}
 
 # Conversation:
-{self.llm_context}
-Task: {prompt}
+{context_str}
 Thought:"""
             response = await loop.run_in_executor(executor, self.llm_call, internal_prompt)
             generated_text = response.strip()
-            # Update context, ensuring clear separation between inputs and thoughts
-            self.llm_context += f"\nTask: {prompt}\nThought: {generated_text}"
+            # Update context with the generated thought
+            self.update_context(f"Thought: {generated_text}")
             logger.debug(f"Generated response: {generated_text}")
             return generated_text
         except Exception as e:
@@ -262,23 +278,37 @@ class TUIRenderer:
             # Display current thoughts
             current_thoughts = self.state.get("current_thoughts", [])
             for thought in current_thoughts:
-                self.stdscr.addstr(current_y, 0, f"Thought: {thought[:max_x]}")
-                current_y += 1
+                wrapped_thought = textwrap.wrap(f"Thought: {thought}", max_x)
+                for line in wrapped_thought:
+                    if current_y >= max_y - 2:
+                        break
+                    self.stdscr.addstr(current_y, 0, line)
+                    current_y += 1
 
             # Display interaction log
-            display_log = await self.interaction_log_manager.get_display_log(max_y - current_y - 2, self.scroll_offset)
+            max_log_lines = max_y - current_y - 2
+            display_log = await self.interaction_log_manager.get_display_log(max_log_lines, self.scroll_offset)
             for interaction in display_log:
                 if current_y >= max_y - 2:
                     break
-                self.stdscr.addstr(current_y, 0, interaction[:max_x])
-                current_y += 1
+                wrapped_interaction = textwrap.wrap(interaction, max_x)
+                for line in wrapped_interaction:
+                    if current_y >= max_y - 2:
+                        break
+                    self.stdscr.addstr(current_y, 0, line)
+                    current_y += 1
         elif self.active_screen == 2:
             # Display debug log
             current_y = 1
-            display_log = self.debug_log[-(max_y - 4 + self.scroll_offset):(-self.scroll_offset if self.scroll_offset > 0 else None)]
+            max_log_lines = max_y - 4
+            display_log = self.debug_log[-(max_log_lines + self.scroll_offset):(-self.scroll_offset if self.scroll_offset > 0 else None)]
             for debug_message in display_log:
-                self.stdscr.addstr(current_y, 0, debug_message[:max_x])
-                current_y += 1
+                wrapped_debug = textwrap.wrap(debug_message, max_x)
+                for line in wrapped_debug:
+                    if current_y >= max_y - 2:
+                        break
+                    self.stdscr.addstr(current_y, 0, line)
+                    current_y += 1
 
         self.stdscr.addstr(max_y - 2, 0, "Input: " + self.input_buffer[: max_x - 5])
         self.stdscr.refresh()
