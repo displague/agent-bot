@@ -28,7 +28,8 @@ logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(message)s",
     handlers=[
         logging.FileHandler("logs/application.log"),
-        logging.StreamHandler(sys.stdout),  # Ensure logs go to stdout
+        # Removed StreamHandler to prevent logs from printing to stdout
+        # logging.StreamHandler(sys.stdout),
     ],
 )
 logger = logging.getLogger("autonomous_system")
@@ -63,8 +64,6 @@ class LlamaModelManager:
         self.llm_lock = Lock()
         self.llm_context = []
         self.context_limit = 512  # Maximum tokens for context
-        # Assuming 0.75 average tokens per word (this is an estimate)
-        self.token_estimate_per_word = 0.75
 
     @contextlib.contextmanager
     def capture_llm_stderr(self):
@@ -282,6 +281,7 @@ class TUIRenderer:
         self.debug_log = []
         self.scroll_offset = 0
         self.audio_waveform = None
+        self.state.setdefault("is_listening", False)
 
     async def start(self):
         logger.debug("Starting TUI rendering...")
@@ -291,82 +291,97 @@ class TUIRenderer:
             await self.render()
             await asyncio.sleep(0.1)
 
+    def render_status_bar(self):
+        max_y, max_x = self.stdscr.getmaxyx()
+        sleep_status = "SLEEPING" if self.state["is_sleeping"] else "ACTIVE"
+        listening_status = " LISTENING" if self.state.get("is_listening", False) else ""
+        status_bar = (
+            f" Status: {sleep_status}{listening_status} | Unprocessed: {self.state['unprocessed_interactions']} "
+            f"| Thoughts: {self.state['ongoing_thoughts']} | Next event: {self.state['next_event']} "
+        )
+        self.stdscr.addstr(0, 0, status_bar[:max_x], curses.A_REVERSE)
+        self.stdscr.clrtoeol()
+
     async def render(self):
         self.stdscr.clear()
-        max_y, max_x = self.stdscr.getmaxyx()
+        self.render_status_bar()
 
         if self.active_screen == 1:
-            sleep_status = "SLEEPING" if self.state["is_sleeping"] else "ACTIVE"
-            status_bar = f" Status: {sleep_status} | Unprocessed: {self.state['unprocessed_interactions']} | Thoughts: {self.state['ongoing_thoughts']} | Next event: {self.state['next_event']} "
-            self.stdscr.addstr(0, 0, status_bar[:max_x], curses.A_REVERSE)
-
-            current_y = 1
-            # Display current thoughts
-            current_thoughts = self.state.get("current_thoughts", [])
-            for thought in current_thoughts:
-                wrapped_thought = textwrap.wrap(f"Thought: {thought}", max_x)
-                for line in wrapped_thought:
-                    if current_y >= max_y - 3:
-                        break
-                    self.stdscr.addstr(current_y, 0, line)
-                    current_y += 1
-
-            # Display interaction log
-            max_log_lines = max_y - current_y - 3
-            display_log = await self.interaction_log_manager.get_display_log(max_log_lines, self.scroll_offset)
-            for interaction in display_log:
-                if current_y >= max_y - 3:
-                    break
-                wrapped_interaction = textwrap.wrap(interaction, max_x)
-                for line in wrapped_interaction:
-                    if current_y >= max_y - 3:
-                        break
-                    self.stdscr.addstr(current_y, 0, line)
-                    current_y += 1
+            await self.render_main_screen()
         elif self.active_screen == 2:
-            # Display debug log
-            current_y = 1
-            max_log_lines = max_y - 4
-            display_log = self.debug_log[-(max_log_lines + self.scroll_offset):(-self.scroll_offset if self.scroll_offset > 0 else None)]
-            for debug_message in display_log:
-                wrapped_debug = textwrap.wrap(debug_message, max_x)
-                for line in wrapped_debug:
-                    if current_y >= max_y - 3:
-                        break
-                    self.stdscr.addstr(current_y, 0, line)
-                    current_y += 1
+            self.render_debug_screen()
 
-        self.stdscr.addstr(max_y - 2, 0, "Input: " + self.input_buffer[: max_x - 7])
-        self.stdscr.clrtoeol()
+        self.render_input_line()
         self.stdscr.refresh()
 
+        await self.handle_input()
+
+        self.process_debug_queue()
+
+    async def render_main_screen(self):
+        max_y, max_x = self.stdscr.getmaxyx()
+        current_y = 1
+
+        # Display current thoughts
+        current_thoughts = self.state.get("current_thoughts", [])
+        for thought in current_thoughts:
+            wrapped_thought = textwrap.wrap(f"Thought: {thought}", max_x)
+            for line in wrapped_thought:
+                if current_y >= max_y - 3:
+                    break
+                self.stdscr.addstr(current_y, 0, line)
+                current_y += 1
+
+        # Display interaction log
+        max_log_lines = max_y - current_y - 3
+        display_log = await self.interaction_log_manager.get_display_log(
+            max_log_lines, self.scroll_offset
+        )
+        for interaction in display_log:
+            if current_y >= max_y - 3:
+                break
+            wrapped_interaction = textwrap.wrap(interaction, max_x)
+            for line in wrapped_interaction:
+                if current_y >= max_y - 3:
+                    break
+                self.stdscr.addstr(current_y, 0, line)
+                current_y += 1
+
+    def render_debug_screen(self):
+        max_y, max_x = self.stdscr.getmaxyx()
+        current_y = 1
+        max_log_lines = max_y - 4
+        display_log = self.debug_log[
+            -(max_log_lines + self.scroll_offset) : (
+                -self.scroll_offset if self.scroll_offset > 0 else None
+            )
+        ]
+        for debug_message in display_log:
+            wrapped_debug = textwrap.wrap(debug_message, max_x)
+            for line in wrapped_debug:
+                if current_y >= max_y - 3:
+                    break
+                self.stdscr.addstr(current_y, 0, line)
+                current_y += 1
+
+    def render_input_line(self):
+        max_y, max_x = self.stdscr.getmaxyx()
+        self.stdscr.addstr(
+            max_y - 2, 0, "Input: " + self.input_buffer[: max_x - 7]
+        )
+        self.stdscr.clrtoeol()
+
+    async def handle_input(self):
         key = self.stdscr.getch()
+        if key == -1:
+            return  # No input
         if key == 27:
             logger.debug("Switching screen view")
             self.active_screen = 2 if self.active_screen == 1 else 1
         elif key == curses.KEY_BACKSPACE or key == 127:
             self.input_buffer = self.input_buffer[:-1]
-        elif key == ord("v"):  # 'v' key for voice input
-            self.stdscr.addstr(max_y - 1, 0, "Listening... (Press any key to stop)")
-            self.stdscr.clrtoeol()
-            self.stdscr.refresh()
-            audio_recorder = AudioRecorder(duration=5)
-            audio_recorder.start()
-            self.stdscr.getch()  # Wait for any key press
-            sd.stop()  # Stop recording when any key is pressed
-            audio_recorder.join()
-            self.audio_waveform = audio_recorder.audio_waveform
-            if self.audio_waveform is not None:
-                transcribed_text = transcribe_audio(self.audio_waveform)
-                if transcribed_text.strip():
-                    self.input_buffer = transcribed_text
-                else:
-                    self.input_buffer = ""
-            else:
-                self.input_buffer = ""
-            self.stdscr.addstr(max_y - 1, 0, " " * (max_x - 1))  # Clear the listening message
-            self.stdscr.addstr(max_y - 2, 0, "Input: " + self.input_buffer[: max_x - 7])
-            self.stdscr.clrtoeol()
+        elif key == 22:  # Ctrl+V key for voice input
+            await self.handle_voice_input()
         elif key in (curses.KEY_ENTER, 10, 13):
             if self.input_buffer.strip():
                 logger.debug(f"Input: {self.input_buffer}")
@@ -381,47 +396,93 @@ class TUIRenderer:
                 await self.interaction_log_manager.append(f"Input: {self.input_buffer}")
                 self.input_buffer = ""
         elif key == curses.KEY_UP:
-            self.scroll_offset = min(
-                self.scroll_offset + 1,
-                len(self.interaction_log_manager.interaction_log) if self.active_screen == 1 else len(self.debug_log),
+            max_log_length = (
+                len(self.interaction_log_manager.interaction_log)
+                if self.active_screen == 1
+                else len(self.debug_log)
             )
+            self.scroll_offset = min(self.scroll_offset + 1, max_log_length)
         elif key == curses.KEY_DOWN:
             self.scroll_offset = max(self.scroll_offset - 1, 0)
         elif key == ord("\t"):
-            self.stdscr.addstr(max_y - 1, 0, "Enter Private Notes: ")
-            self.stdscr.clrtoeol()
-            curses.echo()
-            private_notes = ""
-            while True:
-                note_key = self.stdscr.getch()
-                if note_key in (curses.KEY_ENTER, 10, 13):
-                    break
-                elif note_key == curses.KEY_BACKSPACE or note_key == 127:
-                    private_notes = private_notes[:-1]
-                    self.stdscr.addstr(
-                        max_y - 1,
-                        len("Enter Private Notes: "),
-                        " " * (max_x - len("Enter Private Notes: ")),
-                    )
-                    self.stdscr.addstr(
-                        max_y - 1, len("Enter Private Notes: "), private_notes
-                    )
-                elif 32 <= note_key <= 126:
-                    private_notes += chr(note_key)
-                    self.stdscr.addstr(
-                        max_y - 1, len("Enter Private Notes: "), private_notes
-                    )
-                self.stdscr.clrtoeol()
-                self.stdscr.refresh()
-            curses.noecho()
-            logger.debug(f"Private Notes: {private_notes}")
-            # Process private notes (to be handled)
-            # ...
+            await self.handle_private_notes()
         elif 32 <= key <= 126:
             self.input_buffer += chr(key)
-            self.stdscr.addstr(max_y - 2, 0, "Input: " + self.input_buffer[: max_x - 7])
-            self.stdscr.clrtoeol()
 
+        # Update input line after handling input
+        self.render_input_line()
+        self.stdscr.refresh()
+
+    async def handle_voice_input(self):
+        max_y, max_x = self.stdscr.getmaxyx()
+        self.state["is_listening"] = True
+        self.render_status_bar()
+        self.stdscr.refresh()
+        audio_recorder = AudioRecorder()
+        audio_recorder.start()
+        self.stdscr.nodelay(False)  # Temporarily disable nodelay
+        self.stdscr.getch()  # Wait for any key press
+        self.stdscr.nodelay(True)  # Re-enable nodelay
+        sd.stop()  # Stop recording when any key is pressed
+        audio_recorder.join()
+        self.audio_waveform = audio_recorder.audio_waveform
+        self.state["is_listening"] = False
+        self.render_status_bar()
+        self.stdscr.refresh()
+        if self.audio_waveform is not None:
+            transcribed_text = transcribe_audio(self.audio_waveform)
+            if transcribed_text.strip():
+                self.input_buffer = transcribed_text.strip()
+                # Display the transcribed text in the input line
+                self.render_input_line()
+                self.stdscr.refresh()
+            else:
+                self.input_buffer = ""
+                # Optionally display a message if transcription is empty
+                self.stdscr.addstr(max_y - 1, 0, "Transcription was empty.")
+                self.stdscr.clrtoeol()
+                self.stdscr.refresh()
+                await asyncio.sleep(2)  # Pause to display the message
+        else:
+            self.input_buffer = ""
+            # Optionally display a message if recording failed
+            self.stdscr.addstr(max_y - 1, 0, "Recording failed.")
+            self.stdscr.clrtoeol()
+            self.stdscr.refresh()
+            await asyncio.sleep(2)  # Pause to display the message
+
+    async def handle_private_notes(self):
+        max_y, max_x = self.stdscr.getmaxyx()
+        self.stdscr.addstr(max_y - 1, 0, "Enter Private Notes: ")
+        self.stdscr.clrtoeol()
+        curses.echo()
+        private_notes = ""
+        while True:
+            note_key = self.stdscr.getch()
+            if note_key in (curses.KEY_ENTER, 10, 13):
+                break
+            elif note_key == curses.KEY_BACKSPACE or note_key == 127:
+                private_notes = private_notes[:-1]
+                self.stdscr.addstr(
+                    max_y - 1,
+                    len("Enter Private Notes: "),
+                    " " * (max_x - len("Enter Private Notes: ")),
+                )
+                self.stdscr.addstr(
+                    max_y - 1, len("Enter Private Notes: "), private_notes
+                )
+            elif 32 <= note_key <= 126:
+                private_notes += chr(note_key)
+                self.stdscr.addstr(
+                    max_y - 1, len("Enter Private Notes: "), private_notes
+                )
+            self.stdscr.clrtoeol()
+            self.stdscr.refresh()
+        curses.noecho()
+        logger.debug(f"Private Notes: {private_notes}")
+        # Process private notes (to be handled)
+
+    def process_debug_queue(self):
         while not self.debug_queue.empty():
             try:
                 debug_message = self.debug_queue.get_nowait()
@@ -545,22 +606,26 @@ class AudioRecorder(threading.Thread):
 
 def transcribe_audio(audio_waveform, sample_rate=16000):
     logger.debug("Transcribing audio...")
-    # Load the Whisper model and processor
-    processor = WhisperProcessor.from_pretrained("openai/whisper-small")
-    model = WhisperModel.from_pretrained("openai/whisper-small")
-    model.eval()
+    try:
+        # Load the Whisper model and processor
+        processor = WhisperProcessor.from_pretrained("openai/whisper-small")
+        model = WhisperModel.from_pretrained("openai/whisper-small")
+        model.eval()
 
-    # Prepare the audio input
-    input_features = processor(
-        audio_waveform, sampling_rate=sample_rate, return_tensors="pt"
-    ).input_features
+        # Prepare the audio input
+        input_features = processor(
+            audio_waveform, sampling_rate=sample_rate, return_tensors="pt"
+        ).input_features
 
-    # Generate transcription
-    with torch.no_grad():
-        predicted_ids = model.generate(input_features)
-    transcription = processor.decode(predicted_ids[0])
-    logger.debug(f"Transcription result: {transcription}")
-    return transcription
+        # Generate transcription
+        with torch.no_grad():
+            predicted_ids = model.generate(input_features)
+        transcription = processor.decode(predicted_ids[0])
+        logger.debug(f"Transcription result: {transcription}")
+        return transcription
+    except Exception as e:
+        logger.error(f"Error during transcription: {e}")
+        return ""
 
 def extract_text_features(text):
     # Placeholder for text feature extraction
