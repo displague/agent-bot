@@ -6,8 +6,6 @@ import logging
 from datetime import datetime, timedelta
 from queue import Queue, Empty as QueueEmpty
 import curses
-import requests
-from llama_cpp import Llama
 import sys
 import os
 from threading import Lock
@@ -15,160 +13,102 @@ import json
 from concurrent.futures import ThreadPoolExecutor
 import contextlib
 import torch
-import torchaudio
 import sounddevice as sd
 import numpy as np
+import textwrap
+
 from transformers import WhisperProcessor, WhisperModel
-import textwrap  # Added for text wrapping
-import math  # Added for token estimation
 
-# Set up logging for debug
-logging.basicConfig(
-    level=logging.DEBUG,  # Adjusted logging level
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    handlers=[
-        logging.FileHandler("logs/application.log"),
-        # Removed StreamHandler to prevent logs from printing to stdout
-        # logging.StreamHandler(sys.stdout),
-    ],
-)
-logger = logging.getLogger("autonomous_system")
-
-# Ensure directories exist
+# Logging Setup
 os.makedirs("logs", exist_ok=True)
 os.makedirs("compressed_logs", exist_ok=True)
 os.makedirs("index", exist_ok=True)
 
-# Paths to files
+logging.basicConfig(
+    level=logging.DEBUG,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    handlers=[
+        logging.FileHandler("logs/application.log"),
+    ],
+)
+logger = logging.getLogger("autonomous_system")
+
 HARD_LOG_PATH = "logs/hard_log.jsonl"
 COMPRESSED_LOG_PATH = "compressed_logs/compressed_log.jsonl"
-EVENT_QUEUE_PATH = "logs/event_queue.jsonl"
 INDEX_PATH = "index/context_index.json"
+DAILY_SLEEP_START = 23
+DAILY_SLEEP_END = 7
 
-# Redirect stderr to capture llama_cpp output during model calls
 stderr_fileno = sys.stderr.fileno()
 stderr_backup = os.dup(stderr_fileno)
 original_stderr = sys.stderr
 
-# Constants
-daily_sleep_start = 23  # 11 PM
-daily_sleep_end = 7  # 7 AM
-
-# Create an executor for running blocking LLM calls
 executor = ThreadPoolExecutor(max_workers=5)
 
-class LlamaModelManager:
-    def __init__(self, model_path="model.bin"):
-        logger.debug("Initializing Llama model...")
-        self.llm = Llama(model_path=model_path)
-        self.llm_lock = Lock()
-        self.llm_context = []
-        self.context_limit = 512  # Maximum tokens for context
+###########################################################
+# Utility & Feature extraction (placeholders)
+###########################################################
 
-    @contextlib.contextmanager
-    def capture_llm_stderr(self):
-        stderr_fd = sys.stderr.fileno()
-        with open("logs/llm_stderr.log", "w") as f:
-            old_stderr = os.dup(stderr_fd)
-            os.dup2(f.fileno(), stderr_fd)
-            try:
-                yield
-            finally:
-                os.dup2(old_stderr, stderr_fd)
-                os.close(old_stderr)
-                sys.stderr = original_stderr
+def extract_text_features(text):
+    return {}
 
-    def llm_call(self, prompt):
-        with self.llm_lock, self.capture_llm_stderr():
-            response = self.llm(prompt, max_tokens=512, stop=["\n\n"])
-            return response["choices"][0]["text"]
+def extract_audio_features(audio_waveform):
+    return {}
 
-    def llm_call_private_notes(self, prompt):
-        with self.llm_lock, self.capture_llm_stderr():
-            response = self.llm(prompt, max_tokens=150, stop=["\n\n"])
-            return response["choices"][0]["text"]
+def transcribe_audio(audio_waveform, sample_rate=16000):
+    logger.debug("Transcribing audio...")
+    try:
+        processor = WhisperProcessor.from_pretrained("openai/whisper-small")
+        model = WhisperModel.from_pretrained("openai/whisper-small")
+        model.eval()
+        input_features = processor(audio_waveform, sampling_rate=sample_rate, return_tensors="pt").input_features
+        with torch.no_grad():
+            predicted_ids = model.generate(input_features)
+        transcription = processor.decode(predicted_ids[0]).strip()
+        logger.debug(f"Transcription result: {transcription}")
+        return transcription
+    except Exception as e:
+        logger.error(f"Error during transcription: {e}")
+        return ""
 
-    def update_context(self, new_entry):
-        # Limit the context to avoid exceeding the context window
-        self.llm_context.append(new_entry)
-        # Estimate token count and truncate context if necessary
-        context_str = "\n".join(self.llm_context)
-        total_tokens = self.estimate_token_count(context_str)
-        while total_tokens > self.context_limit:
-            self.llm_context.pop(0)
-            context_str = "\n".join(self.llm_context)
-            total_tokens = self.estimate_token_count(context_str)
+###########################################################
+# Index Manager
+###########################################################
 
-    def estimate_token_count(self, text):
-        # Use the Llama tokenizer to get accurate token count
-        tokens = self.llm.tokenize(text.encode('utf-8'))
-        return len(tokens)
+class IndexManager:
+    def __init__(self):
+        self.index_path = INDEX_PATH
 
-    async def generate_llama_response(self, prompt, notes):
-        logger.debug(f"Generating response for prompt: {prompt}")
-        loop = asyncio.get_running_loop()
-        try:
-            # Update context before generating the prompt
-            self.update_context(f"Task: {prompt}")
+    def extract_keywords(self, text):
+        return list(set(text.lower().split()))
 
-            # Prepare context string
-            context_str = "\n".join(self.llm_context)
+    def load_index(self):
+        if os.path.exists(self.index_path):
+            with open(self.index_path, "r") as index_file:
+                return json.load(index_file)
+        return {}
 
-            internal_prompt = f"""
-# Reflection:
-{notes}
+    def save_index(self, index):
+        with open(self.index_path, "w") as index_file:
+            json.dump(index, index_file)
 
-# Conversation:
-{context_str}
-Thought:"""
-            # Check total tokens to prevent exceeding context window
-            total_tokens = self.estimate_token_count(internal_prompt)
-            if total_tokens > self.context_limit:
-                # Trim context further if necessary
-                while total_tokens > self.context_limit and self.llm_context:
-                    self.llm_context.pop(0)
-                    context_str = "\n".join(self.llm_context)
-                    internal_prompt = f"""
-# Reflection:
-{notes}
+    def index_interaction(self, entry):
+        index = self.load_index()
+        keywords = self.extract_keywords(entry.get("input", "") + " " + entry.get("output", ""))
+        for keyword in keywords:
+            if keyword in index:
+                index[keyword].append(entry)
+            else:
+                index[keyword] = [entry]
+        self.save_index(index)
 
-# Conversation:
-{context_str}
-Thought:"""
-                    total_tokens = self.estimate_token_count(internal_prompt)
+    def search_context(self, keyword):
+        index = self.load_index()
+        return index.get(keyword.lower(), [])
 
-            response = await loop.run_in_executor(executor, self.llm_call, internal_prompt)
-            generated_text = response.strip()
-            # Update context with the generated thought
-            self.update_context(f"Thought: {generated_text}")
-            logger.debug(f"Generated response: {generated_text}")
-            return generated_text
-        except Exception as e:
-            logger.error(f"Error generating response from Llama model: {e}")
-            await asyncio.sleep(1)
-            return "Error generating response."
-
-    async def generate_private_notes(self, prompt):
-        logger.debug("Generating private notes")
-        loop = asyncio.get_running_loop()
-        try:
-            analysis_prompt = f"""
-Note any uncertainties or hesitations regarding the following prompt. Keep it concise and relevant.
-
-Context Information:
-{prompt}
-
-Notes (max 30 words):"""
-            private_notes = await loop.run_in_executor(
-                executor, self.llm_call_private_notes, analysis_prompt
-            )
-            private_notes = private_notes.strip()
-            logger.debug(f"Private Notes: {private_notes}")
-            return private_notes
-        except Exception as e:
-            logger.error(f"Error generating private notes: {e}")
-            await asyncio.sleep(1)
-            return ""
+###########################################################
+# Interaction Log Manager
+###########################################################
 
 class InteractionLogManager:
     def __init__(self):
@@ -183,38 +123,144 @@ class InteractionLogManager:
         async with self.lock:
             return self.interaction_log[-(max_items + scroll_offset):(-scroll_offset if scroll_offset > 0 else None)]
 
-class IndexManager:
-    def __init__(self):
-        self.index_path = INDEX_PATH
+###########################################################
+# LlamaModelManager with Function Calling (Conceptual)
+###########################################################
 
-    def extract_keywords(self, text):
-        # Simple keyword extraction (could use NLP techniques)
-        return list(set(text.lower().split()))
+class LlamaModelManager:
+    """
+    This class manages LLM calls and now simulates "function calling" as per llama-3 function calling specs.
+    It includes phases: planning, execution, digesting, validating, responding.
+    We define a conceptual protocol for function calling here.
+    """
 
-    def load_index(self):
-        if os.path.exists(self.index_path):
-            with open(self.index_path, "r") as index_file:
-                return json.load(index_file)
-        return {}
+    def __init__(self, model_path="model.bin"):
+        from llama_cpp import Llama
+        self.llm = Llama(model_path=model_path)
+        self.llm_lock = Lock()
+        self.llm_context = []
+        self.context_limit = 512
 
-    def save_index(self, index):
-        with open(self.index_path, "w") as index_file:
-            json.dump(index, index_file)
+        # Define available functions (pseudo-code)
+        # In practice, these would conform to Llama-3's function calling specification
+        self.available_functions = {
+            "search_index": self.fn_search_index,
+            "schedule_event": self.fn_schedule_event
+        }
 
-    def index_interaction(self, entry):
-        logger.debug("Indexing interaction")
-        index = self.load_index()
-        keywords = self.extract_keywords(entry.get("input", "") + " " + entry.get("output", ""))
-        for keyword in keywords:
-            if keyword in index:
-                index[keyword].append(entry)
-            else:
-                index[keyword] = [entry]
-        self.save_index(index)
+    @contextlib.contextmanager
+    def capture_llm_stderr(self):
+        stderr_fd = sys.stderr.fileno()
+        with open("logs/llm_stderr.log", "w") as f:
+            old_stderr = os.dup(stderr_fd)
+            os.dup2(f.fileno(), stderr_fd)
+            try:
+                yield
+            finally:
+                os.dup2(old_stderr, stderr_fd)
+                os.close(old_stderr)
+                sys.stderr = original_stderr
 
-    def search_context(self, keyword):
-        index = self.load_index()
-        return index.get(keyword.lower(), [])
+    def llm_call(self, prompt, max_tokens=512):
+        with self.llm_lock, self.capture_llm_stderr():
+            response = self.llm(prompt, max_tokens=max_tokens, stop=["\n\n"])
+            return response["choices"][0]["text"]
+
+    def estimate_token_count(self, text):
+        tokens = self.llm.tokenize(text.encode('utf-8'))
+        return len(tokens)
+
+    def update_context(self, new_entry):
+        self.llm_context.append(new_entry)
+        context_str = "\n".join(self.llm_context)
+        total_tokens = self.estimate_token_count(context_str)
+        while total_tokens > self.context_limit:
+            self.llm_context.pop(0)
+            context_str = "\n".join(self.llm_context)
+            total_tokens = self.estimate_token_count(context_str)
+
+    async def generate_private_notes(self, prompt):
+        loop = asyncio.get_running_loop()
+        analysis_prompt = f"""
+Note any uncertainties or hesitations about the following prompt. Keep it concise.
+
+Context:
+{prompt}
+
+Notes:"""
+        try:
+            private_notes = await loop.run_in_executor(executor, self.llm_call, analysis_prompt, 150)
+            return private_notes.strip()
+        except Exception as e:
+            logger.error(f"Error generating private notes: {e}")
+            return ""
+
+    # Pseudo function calling mechanism:
+    # The model might output something like:
+    # {"name": "search_index", "arguments": {"keyword": "some keyword"}}
+    # We'll parse that and call the corresponding Python function.
+    def call_function(self, function_name, arguments):
+        if function_name in self.available_functions:
+            return self.available_functions[function_name](**arguments)
+        else:
+            return "Error: Function not found."
+
+    def fn_search_index(self, keyword):
+        # Placeholder - actual implementation might need a reference to index_manager
+        # We'll just simulate
+        return f"Searched for {keyword}, results: ..."
+
+    def fn_schedule_event(self, event_type, message):
+        # Placeholder - in reality would schedule with event_scheduler
+        return f"Scheduled {event_type} event with message: {message}"
+
+    async def run_phase(self, phase_name, prompt, notes):
+        """
+        Run a single phase by calling the LLM.
+        If the LLM requests a function call, execute it and feed results back.
+        """
+        loop = asyncio.get_running_loop()
+
+        # Prepare internal prompt for the phase
+        internal_prompt = f"""
+# Phase: {phase_name}
+# Reflection:
+{notes}
+# Context:
+{"\n".join(self.llm_context)}
+# Instruction:
+{prompt}
+
+Now produce the {phase_name} result. If you need to call a function, output JSON in the format:
+{{"name": "function_name", "arguments": {{...}}}}
+Otherwise, produce the {phase_name} text directly.
+"""
+        response = await loop.run_in_executor(executor, self.llm_call, internal_prompt, 512)
+        response = response.strip()
+
+        # Check if response looks like a function call
+        # Pseudo code: parse JSON if it matches function call pattern
+        if response.startswith("{") and response.endswith("}"):
+            # Attempt to parse function call
+            try:
+                call_data = json.loads(response)
+                fname = call_data["name"]
+                args = call_data["arguments"]
+                function_result = self.call_function(fname, args)
+                # Update context with function result
+                self.update_context(f"Function Call: {fname}, args: {args}, result: {function_result}")
+                return function_result
+            except Exception as e:
+                logger.error(f"Failed to parse function call: {e}")
+                return "Error parsing function call."
+        else:
+            # Normal textual response
+            self.update_context(f"{phase_name} Output: {response}")
+            return response
+
+###########################################################
+# Event Scheduler
+###########################################################
 
 class EventScheduler:
     def __init__(self, state, interaction_log_manager, index_manager):
@@ -226,11 +272,8 @@ class EventScheduler:
     async def start(self):
         logger.debug("Starting event scheduler")
         while True:
-            try:
-                event = await self.event_queue.get()
-                asyncio.create_task(self.handle_event(event))
-            except Exception as e:
-                logger.error(f"Error in event scheduler: {e}")
+            event = await self.event_queue.get()
+            asyncio.create_task(self.handle_event(event))
             await asyncio.sleep(1)
 
     async def schedule_event(self, event):
@@ -240,23 +283,19 @@ class EventScheduler:
     async def handle_event(self, event):
         event_type = event["type"]
         logger.info(f"Handling event: {event}")
+
         if event_type == "reminder":
-            message = event["message"]
-            logger.debug(f"Reminder: {message}")
-            await self.interaction_log_manager.append(f"\nReminder: {message}\n")
+            await self.interaction_log_manager.append(f"\nReminder: {event['message']}\n")
         elif event_type == "lookup":
             keyword = event["keyword"]
             results = self.index_manager.search_context(keyword)
-            notes = f"Lookup results for '{keyword}': {results}"
-            logger.debug(f"Notes after lookup: {notes}")
+            logger.debug(f"Lookup results: {results}")
         elif event_type == "deferred_topic":
             topic = event["topic"]
-            logger.debug(f"Revisiting deferred topic: {topic}")
-            message = f"I've thought more about {topic} and would like to discuss it further."
+            message = f"I've revisited {topic} and have more insight."
             await self.interaction_log_manager.append(f"\nThought: {message}\n")
         elif event_type == "rag_completed":
-            logger.debug("Processing RAG completed event")
-            message = "RAG processing has completed. Proceeding with training adjustments."
+            message = "RAG completed. Scheduling training."
             training_event = {
                 "type": "training",
                 "message": message,
@@ -264,10 +303,13 @@ class EventScheduler:
             }
             await self.schedule_event(training_event)
         elif event_type == "training":
-            message = event["message"]
-            logger.debug(f"Training: {message}")
-            await self.interaction_log_manager.append(f"\nTraining: {message}\n")
+            await self.interaction_log_manager.append(f"\nTraining: {event['message']}\n")
+
         self.state["next_event"] = "Not scheduled" if self.event_queue.empty() else "Event pending"
+
+###########################################################
+# TUI Renderer
+###########################################################
 
 class TUIRenderer:
     def __init__(self, stdscr, state, interaction_queue, interaction_log_manager):
@@ -315,14 +357,11 @@ class TUIRenderer:
         self.stdscr.refresh()
 
         await self.handle_input()
-
         self.process_debug_queue()
 
     async def render_main_screen(self):
         max_y, max_x = self.stdscr.getmaxyx()
         current_y = 1
-
-        # Display current thoughts
         current_thoughts = self.state.get("current_thoughts", [])
         for thought in current_thoughts:
             wrapped_thought = textwrap.wrap(f"Thought: {thought}", max_x)
@@ -332,11 +371,8 @@ class TUIRenderer:
                 self.stdscr.addstr(current_y, 0, line)
                 current_y += 1
 
-        # Display interaction log
         max_log_lines = max_y - current_y - 3
-        display_log = await self.interaction_log_manager.get_display_log(
-            max_log_lines, self.scroll_offset
-        )
+        display_log = await self.interaction_log_manager.get_display_log(max_log_lines, self.scroll_offset)
         for interaction in display_log:
             if current_y >= max_y - 3:
                 break
@@ -351,11 +387,7 @@ class TUIRenderer:
         max_y, max_x = self.stdscr.getmaxyx()
         current_y = 1
         max_log_lines = max_y - 4
-        display_log = self.debug_log[
-            -(max_log_lines + self.scroll_offset) : (
-                -self.scroll_offset if self.scroll_offset > 0 else None
-            )
-        ]
+        display_log = self.debug_log[-(max_log_lines + self.scroll_offset) : (-self.scroll_offset if self.scroll_offset > 0 else None)]
         for debug_message in display_log:
             wrapped_debug = textwrap.wrap(debug_message, max_x)
             for line in wrapped_debug:
@@ -374,17 +406,15 @@ class TUIRenderer:
     async def handle_input(self):
         key = self.stdscr.getch()
         if key == -1:
-            return  # No input
+            return
         if key == 27:
-            logger.debug("Switching screen view")
             self.active_screen = 2 if self.active_screen == 1 else 1
         elif key == curses.KEY_BACKSPACE or key == 127:
             self.input_buffer = self.input_buffer[:-1]
-        elif key == 22:  # Ctrl+V key for voice input
+        elif key == 22:  # Ctrl+V for voice input
             await self.handle_voice_input()
         elif key in (curses.KEY_ENTER, 10, 13):
             if self.input_buffer.strip():
-                logger.debug(f"Input: {self.input_buffer}")
                 self.interaction_queue.put(
                     {
                         "input": self.input_buffer,
@@ -404,12 +434,9 @@ class TUIRenderer:
             self.scroll_offset = min(self.scroll_offset + 1, max_log_length)
         elif key == curses.KEY_DOWN:
             self.scroll_offset = max(self.scroll_offset - 1, 0)
-        elif key == ord("\t"):
-            await self.handle_private_notes()
         elif 32 <= key <= 126:
             self.input_buffer += chr(key)
 
-        # Update input line after handling input
         self.render_input_line()
         self.stdscr.refresh()
 
@@ -420,67 +447,32 @@ class TUIRenderer:
         self.stdscr.refresh()
         audio_recorder = AudioRecorder()
         audio_recorder.start()
-        self.stdscr.nodelay(False)  # Temporarily disable nodelay
-        self.stdscr.getch()  # Wait for any key press
-        self.stdscr.nodelay(True)  # Re-enable nodelay
-        sd.stop()  # Stop recording when any key is pressed
+        self.stdscr.nodelay(False)
+        self.stdscr.getch()
+        self.stdscr.nodelay(True)
+        sd.stop()
         audio_recorder.join()
         self.audio_waveform = audio_recorder.audio_waveform
         self.state["is_listening"] = False
         self.render_status_bar()
         self.stdscr.refresh()
+
         if self.audio_waveform is not None:
             transcribed_text = transcribe_audio(self.audio_waveform)
             if transcribed_text.strip():
                 self.input_buffer = transcribed_text.strip()
-                # Display the transcribed text in the input line
-                self.render_input_line()
-                self.stdscr.refresh()
             else:
                 self.input_buffer = ""
-                # Optionally display a message if transcription is empty
                 self.stdscr.addstr(max_y - 1, 0, "Transcription was empty.")
                 self.stdscr.clrtoeol()
                 self.stdscr.refresh()
-                await asyncio.sleep(2)  # Pause to display the message
+                await asyncio.sleep(2)
         else:
             self.input_buffer = ""
-            # Optionally display a message if recording failed
             self.stdscr.addstr(max_y - 1, 0, "Recording failed.")
             self.stdscr.clrtoeol()
             self.stdscr.refresh()
-            await asyncio.sleep(2)  # Pause to display the message
-
-    async def handle_private_notes(self):
-        max_y, max_x = self.stdscr.getmaxyx()
-        self.stdscr.addstr(max_y - 1, 0, "Enter Private Notes: ")
-        self.stdscr.clrtoeol()
-        curses.echo()
-        private_notes = ""
-        while True:
-            note_key = self.stdscr.getch()
-            if note_key in (curses.KEY_ENTER, 10, 13):
-                break
-            elif note_key == curses.KEY_BACKSPACE or note_key == 127:
-                private_notes = private_notes[:-1]
-                self.stdscr.addstr(
-                    max_y - 1,
-                    len("Enter Private Notes: "),
-                    " " * (max_x - len("Enter Private Notes: ")),
-                )
-                self.stdscr.addstr(
-                    max_y - 1, len("Enter Private Notes: "), private_notes
-                )
-            elif 32 <= note_key <= 126:
-                private_notes += chr(note_key)
-                self.stdscr.addstr(
-                    max_y - 1, len("Enter Private Notes: "), private_notes
-                )
-            self.stdscr.clrtoeol()
-            self.stdscr.refresh()
-        curses.noecho()
-        logger.debug(f"Private Notes: {private_notes}")
-        # Process private notes (to be handled)
+            await asyncio.sleep(2)
 
     def process_debug_queue(self):
         while not self.debug_queue.empty():
@@ -490,101 +482,9 @@ class TUIRenderer:
             except QueueEmpty:
                 break
 
-class InteractionProcessor:
-    def __init__(self, interaction_queue, state, llama_manager, interaction_log_manager, index_manager):
-        self.interaction_queue = interaction_queue
-        self.state = state
-        self.llama_manager = llama_manager
-        self.interaction_log_manager = interaction_log_manager
-        self.index_manager = index_manager
-
-    async def start(self):
-        logger.debug("Starting interaction processing...")
-        while True:
-            try:
-                interaction = self.interaction_queue.get_nowait()
-                user_input = interaction.get("input", "")
-                user_private_notes = interaction.get("private_notes", "")
-                audio_waveform = interaction.get("audio_waveform", None)
-
-                logger.info(f"Processing interaction: {user_input}")
-
-                text_features = extract_text_features(user_input)
-                if audio_waveform is not None:
-                    audio_features = extract_audio_features(audio_waveform)
-                    # Combine text and audio features here if needed
-
-                private_notes = await self.llama_manager.generate_private_notes(user_input)
-                # Process private notes (to be implemented)
-                # ...
-
-                response = await self.llama_manager.generate_llama_response(user_input, private_notes)
-
-                logger.info(f"Response: {response}")
-                await self.interaction_log_manager.append(f"Thought: {response}")
-                log_entry = {
-                    "timestamp": datetime.now().isoformat(),
-                    "input": user_input,
-                    "private_notes": user_private_notes,
-                    "output": response,
-                }
-                with open(HARD_LOG_PATH, "a") as log_file:
-                    log_file.write(json.dumps(log_entry) + "\n")
-                self.index_manager.index_interaction(log_entry)
-                self.state["unprocessed_interactions"] = max(0, self.state["unprocessed_interactions"] - 1)
-                await asyncio.sleep(random.uniform(0.5, 1.5))
-            except QueueEmpty:
-                await asyncio.sleep(1)
-            except Exception as e:
-                logger.error(f"Error in process_interactions: {e}")
-                await asyncio.sleep(1)
-
-class ThoughtGenerator:
-    def __init__(self, state, llama_manager, interaction_log_manager, event_scheduler):
-        self.state = state
-        self.llama_manager = llama_manager
-        self.interaction_log_manager = interaction_log_manager
-        self.event_scheduler = event_scheduler
-
-    async def start(self):
-        logger.debug("Starting autonomous thought generation...")
-        while True:
-            current_hour = datetime.now().hour
-            if daily_sleep_start <= current_hour or current_hour < daily_sleep_end:
-                logger.debug("System in sleep mode, reducing activity.")
-                self.state["is_sleeping"] = True
-                await asyncio.sleep(random.uniform(5, 10))
-            else:
-                self.state["is_sleeping"] = False
-                logger.debug("Generating new thoughts")
-                # Spawn multiple thought tasks
-                thought_tasks = []
-                for _ in range(3):  # Number of simultaneous thoughts
-                    thought_tasks.append(asyncio.create_task(self.generate_thought()))
-                await asyncio.gather(*thought_tasks)
-                await asyncio.sleep(random.uniform(1, 3))
-
-    async def generate_thought(self):
-        self.state["ongoing_thoughts"] += 1
-        response = ""
-        try:
-            thought_prompt = f"Thought at {datetime.now().strftime('%H:%M:%S')}"
-            private_notes = await self.llama_manager.generate_private_notes(thought_prompt)
-            # Process private notes (to be implemented)
-            # ...
-            response = await self.llama_manager.generate_llama_response(thought_prompt, private_notes)
-            self.state.setdefault("current_thoughts", []).append(response)
-            await self.interaction_log_manager.append(f"Thought: {response}")
-            # Simulate processing time
-            await asyncio.sleep(random.uniform(1, 3))
-        except Exception as e:
-            logger.error(f"Error in generate_thought: {e}")
-            await asyncio.sleep(1)
-        finally:
-            self.state["ongoing_thoughts"] = max(0, self.state["ongoing_thoughts"] - 1)
-            # Remove the thought from current_thoughts
-            if "current_thoughts" in self.state and response in self.state["current_thoughts"]:
-                self.state["current_thoughts"].remove(response)
+###########################################################
+# Audio Recorder
+###########################################################
 
 class AudioRecorder(threading.Thread):
     def __init__(self, duration=5, sample_rate=16000):
@@ -604,40 +504,140 @@ class AudioRecorder(threading.Thread):
         self.audio_waveform = torch.from_numpy(audio_data.flatten())
         logger.debug("Audio recording completed.")
 
-def transcribe_audio(audio_waveform, sample_rate=16000):
-    logger.debug("Transcribing audio...")
-    try:
-        # Load the Whisper model and processor
-        processor = WhisperProcessor.from_pretrained("openai/whisper-small")
-        model = WhisperModel.from_pretrained("openai/whisper-small")
-        model.eval()
+###########################################################
+# FunctionalAgent: Integrating the phases and function calls
+###########################################################
 
-        # Prepare the audio input
-        input_features = processor(
-            audio_waveform, sampling_rate=sample_rate, return_tensors="pt"
-        ).input_features
+class FunctionalAgent:
+    """
+    This agent uses the llama model manager to go through multiple phases
+    for each request:
+    1. Planning
+    2. Execution (researching/solving)
+    3. Digesting
+    4. Validating
+    5. Responding
 
-        # Generate transcription
-        with torch.no_grad():
-            predicted_ids = model.generate(input_features)
-        transcription = processor.decode(predicted_ids[0])
-        logger.debug(f"Transcription result: {transcription}")
-        return transcription
-    except Exception as e:
-        logger.error(f"Error during transcription: {e}")
-        return ""
+    It uses function calls if needed.
+    """
+    def __init__(self, llama_manager: LlamaModelManager):
+        self.llama_manager = llama_manager
 
-def extract_text_features(text):
-    # Placeholder for text feature extraction
-    logger.debug("Extracting text features...")
-    # Implement your text feature extraction logic here
-    return {}
+    async def handle_request(self, prompt):
+        # Generate private notes as a quick reflection
+        private_notes = await self.llama_manager.generate_private_notes(prompt)
 
-def extract_audio_features(audio_waveform):
-    # Placeholder for audio feature extraction
-    logger.debug("Extracting audio features...")
-    # Implement your audio feature extraction logic here
-    return {}
+        # Phase 1: Planning
+        plan_result = await self.llama_manager.run_phase("Planning", prompt, private_notes)
+
+        # Phase 2: Execution (the model may request function calls or produce partial results)
+        execution_result = await self.llama_manager.run_phase("Execution", prompt, plan_result)
+
+        # Phase 3: Digesting results
+        digest_result = await self.llama_manager.run_phase("Digesting", prompt, execution_result)
+
+        # Phase 4: Validating correctness
+        validate_result = await self.llama_manager.run_phase("Validating", prompt, digest_result)
+
+        # Phase 5: Final response to user
+        final_response = await self.llama_manager.run_phase("Responding", prompt, validate_result)
+
+        return final_response
+
+###########################################################
+# Interaction Processor & Thought Generator
+###########################################################
+
+class InteractionProcessor:
+    """
+    Now uses the FunctionalAgent to handle each interaction in phases.
+    """
+    def __init__(self, interaction_queue, state, llama_manager, interaction_log_manager, index_manager):
+        self.interaction_queue = interaction_queue
+        self.state = state
+        self.llama_manager = llama_manager
+        self.interaction_log_manager = interaction_log_manager
+        self.index_manager = index_manager
+        self.functional_agent = FunctionalAgent(self.llama_manager)
+
+    async def start(self):
+        logger.debug("Starting interaction processing...")
+        while True:
+            try:
+                interaction = self.interaction_queue.get_nowait()
+                user_input = interaction.get("input", "")
+                audio_waveform = interaction.get("audio_waveform", None)
+
+                logger.info(f"Processing interaction: {user_input}")
+                if audio_waveform is not None:
+                    audio_features = extract_audio_features(audio_waveform)
+
+                # Process request with multi-phase approach
+                response = await self.functional_agent.handle_request(user_input)
+                logger.info(f"Response: {response}")
+
+                await self.interaction_log_manager.append(f"Thought: {response}")
+                log_entry = {
+                    "timestamp": datetime.now().isoformat(),
+                    "input": user_input,
+                    "output": response,
+                }
+                with open(HARD_LOG_PATH, "a") as log_file:
+                    log_file.write(json.dumps(log_entry) + "\n")
+
+                self.index_manager.index_interaction(log_entry)
+                self.state["unprocessed_interactions"] = max(0, self.state["unprocessed_interactions"] - 1)
+                await asyncio.sleep(random.uniform(0.5, 1.5))
+            except QueueEmpty:
+                await asyncio.sleep(1)
+            except Exception as e:
+                logger.error(f"Error in process_interactions: {e}")
+                await asyncio.sleep(1)
+
+class ThoughtGenerator:
+    """
+    Generates autonomous thoughts periodically, also using phases.
+    """
+    def __init__(self, state, llama_manager, interaction_log_manager, event_scheduler):
+        self.state = state
+        self.llama_manager = llama_manager
+        self.interaction_log_manager = interaction_log_manager
+        self.event_scheduler = event_scheduler
+        self.functional_agent = FunctionalAgent(self.llama_manager)
+
+    async def start(self):
+        logger.debug("Starting autonomous thought generation...")
+        while True:
+            current_hour = datetime.now().hour
+            if DAILY_SLEEP_START <= current_hour or current_hour < DAILY_SLEEP_END:
+                self.state["is_sleeping"] = True
+                await asyncio.sleep(random.uniform(5, 10))
+            else:
+                self.state["is_sleeping"] = False
+                logger.debug("Generating new autonomous thoughts")
+                tasks = [asyncio.create_task(self.generate_thought()) for _ in range(3)]
+                await asyncio.gather(*tasks)
+                await asyncio.sleep(random.uniform(1, 3))
+
+    async def generate_thought(self):
+        self.state["ongoing_thoughts"] += 1
+        thought_prompt = f"Autonomous thought at {datetime.now().strftime('%H:%M:%S')}"
+        try:
+            response = await self.functional_agent.handle_request(thought_prompt)
+            self.state.setdefault("current_thoughts", []).append(response)
+            await self.interaction_log_manager.append(f"Thought: {response}")
+            await asyncio.sleep(random.uniform(1, 3))
+        except Exception as e:
+            logger.error(f"Error in generate_thought: {e}")
+            await asyncio.sleep(1)
+        finally:
+            self.state["ongoing_thoughts"] = max(0, self.state["ongoing_thoughts"] - 1)
+            if "current_thoughts" in self.state and response in self.state["current_thoughts"]:
+                self.state["current_thoughts"].remove(response)
+
+###########################################################
+# EventCompressor
+###########################################################
 
 class EventCompressor:
     def __init__(self, llama_manager, event_scheduler):
@@ -648,34 +648,36 @@ class EventCompressor:
         logger.debug("Starting periodic event compression...")
         while True:
             await self.compress_events()
-            await asyncio.sleep(3600)  # Run every hour
+            await asyncio.sleep(3600)
 
     async def compress_events(self):
         logger.debug("Starting event compression")
+        if not os.path.exists(HARD_LOG_PATH):
+            logger.debug("No logs to compress.")
+            return
         try:
-            if not os.path.exists(HARD_LOG_PATH):
-                logger.debug("No logs to compress.")
-                return
             with open(HARD_LOG_PATH, "r") as log_file:
                 logs = [json.loads(line) for line in log_file if line.strip()]
+            if not logs:
+                logger.debug("No events to compress.")
+                return
+
             events_text = ""
             for entry in logs:
                 input_text = entry.get('input', '')
                 output_text = entry.get('output', '')
-                private_notes = entry.get('private_notes', '')
-                events_text += f"Task: {input_text}\n"
-                if private_notes:
-                    events_text += f"Private Notes: {private_notes}\n"
-                events_text += f"Thought: {output_text}\n"
+                events_text += f"Task: {input_text}\nThought: {output_text}\n"
+
             if not events_text.strip():
                 logger.debug("No events to compress.")
                 return
-            prompt = f"""Summarize the following interactions, incorporating relevant private notes to improve future training:
+
+            # Could also use function-calling approach if needed
+            prompt = f"""Summarize the following interactions for future reference:
 
 {events_text}
 
 Summary:"""
-            logger.debug("Generating summary using LLM")
             summary = await asyncio.get_event_loop().run_in_executor(
                 executor, self.llama_manager.llm_call, prompt
             )
@@ -684,11 +686,16 @@ Summary:"""
             with open(COMPRESSED_LOG_PATH, "a") as comp_log_file:
                 comp_log_file.write(json.dumps(compressed_entry) + "\n")
             logger.info("Event compression completed")
+
             rag_event = {"type": "rag_completed", "trigger_time": datetime.now()}
             await self.event_scheduler.schedule_event(rag_event)
         except Exception as e:
             logger.error(f"Error in compress_events: {e}")
             await asyncio.sleep(1)
+
+###########################################################
+# Main Application
+###########################################################
 
 class MainApplication:
     def __init__(self):
@@ -696,7 +703,7 @@ class MainApplication:
             "unprocessed_interactions": 0,
             "ongoing_thoughts": 0,
             "next_event": "Not scheduled",
-            "is_sleeping": False,  # New state variable
+            "is_sleeping": False,
         }
         self.interaction_queue = Queue()
         self.llama_manager = LlamaModelManager()
@@ -708,7 +715,7 @@ class MainApplication:
         self.event_compressor = EventCompressor(self.llama_manager, self.event_scheduler)
 
     async def main(self, stdscr):
-        loop = asyncio.get_running_loop()  # Store the event loop
+        loop = asyncio.get_running_loop()
         logger.debug("Starting main event loop...")
         self.tui_renderer = TUIRenderer(stdscr, self.state, self.interaction_queue, self.interaction_log_manager)
         tasks = [
@@ -727,7 +734,6 @@ class MainApplication:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
 
-# Run the program
 if __name__ == "__main__":
     try:
         logger.debug("Launching TUI application...")
