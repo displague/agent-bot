@@ -151,37 +151,17 @@ class TUIRenderer:
         self.stdscr.refresh()
 
     async def handle_voice_input(self):
-        """Handles voice input."""
-        from audio_recorder import AudioRecorder
-
+        """Handles voice input using PersonaPlex."""
+        # TODO: Integrate PersonaPlex for speech input
         max_y, max_x = self.stdscr.getmaxyx()
         self.state["is_listening"] = True
         self.render_status_bar()
         self.stdscr.refresh()
-        audio_recorder = AudioRecorder()
-        audio_recorder.start()
-        self.stdscr.nodelay(False)
-        self.stdscr.getch()  # Wait for any key press
-        self.stdscr.nodelay(True)
-        sd.stop()
-        audio_recorder.join()
-        self.audio_waveform = audio_recorder.audio_waveform
-
-        if self.audio_waveform is not None:
-            transcribed_text = transcribe_audio(self.audio_waveform)
-            if transcribed_text.strip():
-                self.input_buffer = transcribed_text
-                self.render_input_line()
-            else:
-                self.input_buffer = ""
-                self.stdscr.addstr(max_y - 1, 0, "Transcription was empty.")
-                self.stdscr.clrtoeol()
-                await asyncio.sleep(2)  # Pause to display the message
-        else:
-            self.input_buffer = ""
-            self.stdscr.addstr(max_y - 1, 0, "Recording failed.")
-            self.stdscr.clrtoeol()
-            await asyncio.sleep(2)
+        # Placeholder for PersonaPlex speech-to-text
+        self.stdscr.addstr(max_y - 1, 0, "Voice input not yet integrated.")
+        self.stdscr.clrtoeol()
+        await asyncio.sleep(2)
+        self.state["is_listening"] = False
 
         self.state["is_listening"] = False
         self.render_status_bar()

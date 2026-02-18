@@ -1,0 +1,12 @@
+{
+  "name": "index_search",
+  "description": "Searches interaction logs and indexes for context retrieval using keyword-based indexing.",
+  "parameters": {
+    "query": "Keyword or phrase to search for",
+    "max_results": "Maximum number of results to return (default 10)",
+    "file_path": "Path to index file (optional, defaults to config.INDEX_PATH)"
+  },
+  "output": "List of matching interactions with timestamps and summaries",
+  "dependencies": ["json", "os"],
+  "usage": "Used in llama_model_manager.py for function call simulation; supports context augmentation."
+}

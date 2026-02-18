@@ -10,7 +10,6 @@ from interaction_log_manager import InteractionLogManager
 from llama_model_manager import LlamaModelManager
 from event_scheduler import EventScheduler
 from tui_renderer import TUIRenderer
-from audio_recorder import AudioRecorder
 from functional_agent import FunctionalAgent
 from interaction_processor import InteractionProcessor
 from thought_generator import ThoughtGenerator

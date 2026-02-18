@@ -1,0 +1,13 @@
+{
+  "name": "speech_to_speech",
+  "description": "Handles bidirectional speech-to-speech conversion using NVIDIA PersonaPlex for real-time conversations with persona control.",
+  "parameters": {
+    "input_wav": "Path to input WAV file for speech input",
+    "voice_prompt": "Voice embedding file (e.g., NATF2.pt) for voice conditioning",
+    "text_prompt": "Text-based persona prompt (e.g., 'You are a wise assistant.')",
+    "output_wav": "Path for output WAV file",
+    "seed": "Random seed for reproducibility (optional)"
+  },
+  "dependencies": ["moshi", "opus"],
+  "usage": "Used in utils.py for audio processing; supports offline and server modes."
+}
