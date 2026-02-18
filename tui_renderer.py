@@ -2,9 +2,19 @@
 
 import asyncio
 import curses
+import os
+import tempfile
 import textwrap
 from queue import Queue, Empty as QueueEmpty
 import logging
+
+from config import (
+    PERSONAPLEX_TEXT_PROMPT,
+    PERSONAPLEX_VOICE_PROMPT,
+    VOICE_CAPTURE_SECONDS,
+    VOICE_SAMPLE_RATE,
+)
+from utils import capture_microphone_to_wav, play_wav_file, run_personaplex_offline
 
 logger = logging.getLogger("autonomous_system.tui_renderer")
 
@@ -23,6 +33,8 @@ class TUIRenderer:
         self.scroll_offset = 0
         self.audio_waveform = None
         self.state.setdefault("is_listening", False)
+        self.state.setdefault("voice_prompt", PERSONAPLEX_VOICE_PROMPT)
+        self.state.setdefault("persona_prompt", PERSONAPLEX_TEXT_PROMPT)
 
     async def start(self):
         """Starts the TUI rendering."""
@@ -41,6 +53,7 @@ class TUIRenderer:
         status_bar = (
             f" Status: {sleep_status}{listening_status} | Unprocessed: {self.state['unprocessed_interactions']} "
             f"| Thoughts: {self.state['ongoing_thoughts']} | Next event: {self.state['next_event']} "
+            f"| Voice: {self.state.get('voice_prompt', PERSONAPLEX_VOICE_PROMPT)} "
         )
         self.stdscr.addstr(0, 0, status_bar[:max_x], curses.A_REVERSE)
         self.stdscr.clrtoeol()
@@ -125,7 +138,7 @@ class TUIRenderer:
             await self.handle_voice_input()
         elif key in (curses.KEY_ENTER, 10, 13):  # Enter key
             if self.input_buffer.strip():
-                self.interaction_queue.put(
+                self.interaction_queue.put_nowait(
                     {
                         "input": self.input_buffer,
                         "private_notes": "",
@@ -152,20 +165,67 @@ class TUIRenderer:
 
     async def handle_voice_input(self):
         """Handles voice input using PersonaPlex."""
-        # TODO: Integrate PersonaPlex for speech input
         max_y, max_x = self.stdscr.getmaxyx()
-        self.state["is_listening"] = True
-        self.render_status_bar()
-        self.stdscr.refresh()
-        # Placeholder for PersonaPlex speech-to-text
-        self.stdscr.addstr(max_y - 1, 0, "Voice input not yet integrated.")
-        self.stdscr.clrtoeol()
-        await asyncio.sleep(2)
-        self.state["is_listening"] = False
+        try:
+            self.state["is_listening"] = True
+            self.render_status_bar()
+            self.stdscr.addstr(
+                max_y - 1,
+                0,
+                f"Recording voice for {VOICE_CAPTURE_SECONDS}s...",
+            )
+            self.stdscr.clrtoeol()
+            self.stdscr.refresh()
 
-        self.state["is_listening"] = False
-        self.render_status_bar()
-        self.stdscr.refresh()
+            with tempfile.TemporaryDirectory(prefix="agentbot_voice_") as tmpdir:
+                input_wav = os.path.join(tmpdir, "input.wav")
+                output_wav = os.path.join(tmpdir, "output.wav")
+                output_text = os.path.join(tmpdir, "output_text.json")
+
+                await asyncio.to_thread(
+                    capture_microphone_to_wav,
+                    input_wav,
+                    VOICE_CAPTURE_SECONDS,
+                    VOICE_SAMPLE_RATE,
+                )
+                self.stdscr.addstr(max_y - 1, 0, "Processing PersonaPlex response...")
+                self.stdscr.clrtoeol()
+                self.stdscr.refresh()
+
+                response = await asyncio.to_thread(
+                    run_personaplex_offline,
+                    input_wav,
+                    output_wav,
+                    output_text=output_text,
+                    voice_prompt=self.state.get(
+                        "voice_prompt", PERSONAPLEX_VOICE_PROMPT
+                    ),
+                    text_prompt=self.state.get(
+                        "persona_prompt", PERSONAPLEX_TEXT_PROMPT
+                    ),
+                )
+                await asyncio.to_thread(play_wav_file, output_wav)
+
+                generated_text = response.get("generated_text", "").strip()
+                if generated_text:
+                    await self.interaction_log_manager.append(
+                        f"Voice Response: {generated_text}"
+                    )
+                else:
+                    await self.interaction_log_manager.append(
+                        "Voice Response: [audio generated]"
+                    )
+
+                self.stdscr.addstr(max_y - 1, 0, "Voice turn completed.")
+                self.stdscr.clrtoeol()
+        except Exception as e:
+            self.logger.error(f"Voice input failed: {e}")
+            self.stdscr.addstr(max_y - 1, 0, f"Voice error: {str(e)[: max_x - 13]}")
+            self.stdscr.clrtoeol()
+        finally:
+            self.state["is_listening"] = False
+            self.render_status_bar()
+            self.stdscr.refresh()
 
     def process_debug_queue(self):
         """Processes the debug queue."""
