@@ -1,5 +1,4 @@
 import asyncio
-import curses
 from concurrent.futures import ThreadPoolExecutor
 
 # Import modules
@@ -10,13 +9,14 @@ from interaction_log_manager import InteractionLogManager
 from llama_model_manager import LlamaModelManager
 from event_scheduler import EventScheduler
 from tui_renderer import TUIRenderer
+from simple_renderer import SimpleRenderer
 from functional_agent import FunctionalAgent
 from interaction_processor import InteractionProcessor
 from thought_generator import ThoughtGenerator
 from event_compressor import EventCompressor
 
 
-async def main(stdscr):
+async def main(stdscr=None):
     # Initialize logging
     redirect_stderr, restore_stderr, logger = setup_logging()
     backup, f = redirect_stderr()  # Get backup and file object from redirect_stderr
@@ -35,9 +35,10 @@ async def main(stdscr):
     index_manager = IndexManager()
     interaction_log_manager = InteractionLogManager()
     event_scheduler = EventScheduler(state, interaction_log_manager, index_manager)
-    tui_renderer = TUIRenderer(
-        stdscr, state, interaction_queue, interaction_log_manager
-    )
+    if stdscr is not None:
+        ui_renderer = TUIRenderer(stdscr, state, interaction_queue, interaction_log_manager)
+    else:
+        ui_renderer = SimpleRenderer(state, interaction_queue, interaction_log_manager)
     interaction_processor = InteractionProcessor(
         interaction_queue, state, llama_manager, interaction_log_manager, index_manager
     )
@@ -48,7 +49,7 @@ async def main(stdscr):
 
     # Start tasks
     tasks = [
-        asyncio.create_task(tui_renderer.start()),
+        asyncio.create_task(ui_renderer.start()),
         asyncio.create_task(event_scheduler.start()),
         asyncio.create_task(interaction_processor.start()),
         asyncio.create_task(thought_generator.start()),
@@ -72,7 +73,12 @@ if __name__ == "__main__":
     redirect_stderr, restore_stderr, logger = setup_logging()
     backup, f = redirect_stderr()  # Store the file object
     try:
-        curses.wrapper(lambda stdscr: asyncio.run(main(stdscr)))
+        try:
+            import curses  # noqa: PLC0415
+        except Exception:
+            asyncio.run(main(None))
+        else:
+            curses.wrapper(lambda stdscr: asyncio.run(main(stdscr)))
     except Exception as e:
         print(f"An error occurred: {e}")
     finally:

@@ -74,6 +74,12 @@ python main.py
 ```
 
 Use Ctrl+V in TUI for voice input via PersonaPlex.
+If curses is unavailable (for example on native Windows Python), the app falls back to a simple stdin mode automatically.
+
+PersonaPlex CLI check:
+```bash
+personaplex/.venv/Scripts/python.exe -m moshi.offline --help
+```
 
 ## Configuration
 

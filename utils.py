@@ -14,6 +14,7 @@ from config import (
     PERSONAPLEX_CPU_OFFLOAD,
     PERSONAPLEX_DEVICE,
     PERSONAPLEX_OFFLINE_TIMEOUT_SECONDS,
+    PERSONAPLEX_PYTHON_BIN,
     PERSONAPLEX_TEXT_PROMPT,
     PERSONAPLEX_VOICE_PROMPT,
     PERSONAPLEX_VOICE_PROMPT_DIR,
@@ -86,6 +87,20 @@ def _decode_output_tokens(output_text_path: str) -> str:
     return "".join(filtered).strip()
 
 
+def _resolve_personaplex_python() -> str:
+    if PERSONAPLEX_PYTHON_BIN:
+        return PERSONAPLEX_PYTHON_BIN
+
+    candidates = [
+        Path("personaplex/.venv/Scripts/python.exe"),
+        Path("personaplex/.venv/bin/python"),
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return str(candidate)
+    return sys.executable
+
+
 def run_personaplex_offline(
     input_wav: str,
     output_wav: str,
@@ -107,7 +122,7 @@ def run_personaplex_offline(
     resolved_voice_dir = voice_prompt_dir or str(Path(voice_prompt).parent)
 
     command = [
-        sys.executable,
+        _resolve_personaplex_python(),
         "-m",
         "moshi.offline",
         "--input-wav",
