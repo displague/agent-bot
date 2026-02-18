@@ -30,7 +30,23 @@ async def main(stdscr=None):
         "is_sleeping": False,
     }
     interaction_queue = asyncio.Queue()
+
+    if stdscr is not None:
+        stdscr.clear()
+        stdscr.addstr(0, 0, "Loading model... please wait.")
+        stdscr.refresh()
+    else:
+        print("Loading model... please wait.", flush=True)
+
     llama_manager = LlamaModelManager(model_path=MODEL_PATH)
+
+    if stdscr is not None:
+        stdscr.clear()
+        stdscr.addstr(0, 0, "Model loaded. Starting UI...")
+        stdscr.refresh()
+    else:
+        print("Model loaded. Starting UI...", flush=True)
+
     index_manager = IndexManager()
     interaction_log_manager = InteractionLogManager()
     event_scheduler = EventScheduler(state, interaction_log_manager, index_manager)
