@@ -8,7 +8,6 @@ from index_manager import IndexManager
 from interaction_log_manager import InteractionLogManager
 from llama_model_manager import LlamaModelManager
 from event_scheduler import EventScheduler
-from tui_renderer import TUIRenderer
 from simple_renderer import SimpleRenderer
 from functional_agent import FunctionalAgent
 from interaction_processor import InteractionProcessor
@@ -36,6 +35,8 @@ async def main(stdscr=None):
     interaction_log_manager = InteractionLogManager()
     event_scheduler = EventScheduler(state, interaction_log_manager, index_manager)
     if stdscr is not None:
+        from tui_renderer import TUIRenderer  # noqa: PLC0415
+
         ui_renderer = TUIRenderer(stdscr, state, interaction_queue, interaction_log_manager)
     else:
         ui_renderer = SimpleRenderer(state, interaction_queue, interaction_log_manager)
