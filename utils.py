@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -27,6 +28,12 @@ except Exception:  # pragma: no cover - dependency may be optional at runtime
     sd = None
 
 logger = logging.getLogger("autonomous_system.utils")
+
+
+class PersonaPlexServerHandle:
+    def __init__(self, process: subprocess.Popen, ssl_dir: str):
+        self.process = process
+        self.ssl_dir = ssl_dir
 
 
 def extract_text_features(text: str) -> Dict[str, Any]:
@@ -168,6 +175,44 @@ def run_personaplex_offline(
         "generated_text": generated_text,
         "stdout": result.stdout,
     }
+
+
+def start_personaplex_server(cpu_offload: bool = PERSONAPLEX_CPU_OFFLOAD) -> PersonaPlexServerHandle:
+    """Start PersonaPlex server mode for full-duplex interaction."""
+    ssl_dir = tempfile.mkdtemp(prefix="personaplex_ssl_")
+    command = [
+        _resolve_personaplex_python(),
+        "-m",
+        "moshi.server",
+        "--ssl",
+        ssl_dir,
+    ]
+    if cpu_offload:
+        command.append("--cpu-offload")
+    logger.info("Starting PersonaPlex server mode.")
+    process = subprocess.Popen(
+        command,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        env=os.environ.copy(),
+    )
+    return PersonaPlexServerHandle(process=process, ssl_dir=ssl_dir)
+
+
+def stop_personaplex_server(handle: Optional[PersonaPlexServerHandle]) -> None:
+    """Stop a running PersonaPlex server process and clean temporary SSL files."""
+    if handle is None:
+        return
+    try:
+        if handle.process.poll() is None:
+            handle.process.terminate()
+            try:
+                handle.process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                handle.process.kill()
+                handle.process.wait(timeout=5)
+    finally:
+        shutil.rmtree(handle.ssl_dir, ignore_errors=True)
 
 
 def transcribe_audio(audio_waveform, sample_rate: int = VOICE_SAMPLE_RATE) -> str:

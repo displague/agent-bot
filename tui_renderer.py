@@ -2,32 +2,39 @@
 
 import asyncio
 import curses
-import os
-import tempfile
 import textwrap
 from queue import Queue, Empty as QueueEmpty
 import logging
 
 from config import (
+    PERSONAPLEX_SERVER_URL,
     PERSONAPLEX_TEXT_PROMPT,
     PERSONAPLEX_VOICE_PROMPT,
-    VOICE_CAPTURE_SECONDS,
     VOICE_CAPTURE_KEY_CODE,
     VOICE_CAPTURE_KEY_LABEL,
-    VOICE_SAMPLE_RATE,
 )
 from smoke_test_runner import (
     run_deterministic_smoke,
     run_model_smoke,
     summarize_smoke_result,
 )
-from utils import capture_microphone_to_wav, play_wav_file, run_personaplex_offline
+from utils import start_personaplex_server, stop_personaplex_server
 
 logger = logging.getLogger("autonomous_system.tui_renderer")
 
 
 class TUIRenderer:
-    COMMANDS = ["/help", "/smoke", "/smoke-model", "/smoke-all", "/quit", "/exit"]
+    COMMANDS = [
+        "/help",
+        "/smoke",
+        "/smoke-model",
+        "/smoke-all",
+        "/voice-start",
+        "/voice-stop",
+        "/voice-status",
+        "/quit",
+        "/exit",
+    ]
 
     def __init__(
         self,
@@ -51,9 +58,11 @@ class TUIRenderer:
         self.audio_waveform = None
         self._stop = False
         self._refresh_interval_seconds = 0.2
+        self._voice_server_handle = None
         self.state.setdefault("is_listening", False)
         self.state.setdefault("voice_prompt", PERSONAPLEX_VOICE_PROMPT)
         self.state.setdefault("persona_prompt", PERSONAPLEX_TEXT_PROMPT)
+        self.state.setdefault("voice_mode", "offline-disabled")
 
     async def start(self):
         """Starts the TUI rendering."""
@@ -61,16 +70,20 @@ class TUIRenderer:
         curses.curs_set(1)
         self.stdscr.nodelay(True)
         await self.interaction_log_manager.append(
-            f"Type /help for commands. {VOICE_CAPTURE_KEY_LABEL} records voice. Esc toggles debug."
+            f"Type /help for commands. {VOICE_CAPTURE_KEY_LABEL} starts voice server mode. Esc toggles debug."
         )
-        while not self._stop:
-            try:
-                await self.render()
-            except Exception as e:
-                self.logger.exception("TUI render loop error: %s", e)
-                self.show_footer_message(f"TUI error: {str(e)[:120]}")
-                await self.interaction_log_manager.append(f"TUI error: {e}")
-            await asyncio.sleep(self._refresh_interval_seconds)
+        try:
+            while not self._stop:
+                try:
+                    await self.render()
+                except Exception as e:
+                    self.logger.exception("TUI render loop error: %s", e)
+                    self.show_footer_message(f"TUI error: {str(e)[:120]}")
+                    await self.interaction_log_manager.append(f"TUI error: {e}")
+                await asyncio.sleep(self._refresh_interval_seconds)
+        finally:
+            stop_personaplex_server(self._voice_server_handle)
+            self._voice_server_handle = None
 
     def _safe_addstr(self, y, x, text, attr=0):
         max_y, max_x = self.stdscr.getmaxyx()
@@ -91,10 +104,11 @@ class TUIRenderer:
         sleep_status = "SLEEPING" if self.state["is_sleeping"] else "ACTIVE"
         listening_status = " LISTENING" if self.state.get("is_listening", False) else ""
         processing_status = " PROCESSING" if self.state.get("is_processing", False) else ""
+        voice_mode = self.state.get("voice_mode", "unknown")
         status_bar = (
             f" Status: {sleep_status}{listening_status}{processing_status} | Unprocessed: {self.state['unprocessed_interactions']} "
             f"| Thoughts: {self.state['ongoing_thoughts']} | Next event: {self.state['next_event']} "
-            f"| Voice: {self.state.get('voice_prompt', PERSONAPLEX_VOICE_PROMPT)} "
+            f"| Voice: {voice_mode} "
         )
         self._safe_addstr(0, 0, status_bar[:max_x], curses.A_REVERSE)
         try:
@@ -197,7 +211,7 @@ class TUIRenderer:
         elif key == curses.KEY_BACKSPACE or key == 127:  # Backspace or delete
             self.input_buffer = self.input_buffer[:-1]
         elif key == VOICE_CAPTURE_KEY_CODE:
-            await self.handle_voice_input()
+            await self.handle_command("/voice-start")
         elif key in (curses.KEY_ENTER, 10, 13):  # Enter key
             if self.input_buffer.strip():
                 normalized = self.input_buffer.strip().lower()
@@ -253,13 +267,62 @@ class TUIRenderer:
         if cmd in {"/quit", "/exit"}:
             await self.interaction_log_manager.append("Shutting down...")
             self.show_footer_message("Shutting down...")
+            stop_personaplex_server(self._voice_server_handle)
+            self._voice_server_handle = None
             self._stop = True
             return
         if cmd == "/help":
             await self.interaction_log_manager.append(
-                f"Commands: /help, /smoke, /smoke-model, /smoke-all, /quit. Voice: {VOICE_CAPTURE_KEY_LABEL}"
+                (
+                    "Commands: /help, /smoke, /smoke-model, /smoke-all, "
+                    "/voice-start, /voice-stop, /voice-status, /quit. "
+                    f"Voice start hotkey: {VOICE_CAPTURE_KEY_LABEL}"
+                )
             )
             self.show_footer_message("Command help added to log.")
+            return
+        if cmd == "/voice-status":
+            active = (
+                self._voice_server_handle is not None
+                and self._voice_server_handle.process.poll() is None
+            )
+            msg = (
+                f"Voice server: {'running' if active else 'stopped'} "
+                f"({PERSONAPLEX_SERVER_URL})"
+            )
+            await self.interaction_log_manager.append(msg)
+            self.show_footer_message(msg)
+            return
+        if cmd == "/voice-start":
+            active = (
+                self._voice_server_handle is not None
+                and self._voice_server_handle.process.poll() is None
+            )
+            if active:
+                msg = f"Voice server already running at {PERSONAPLEX_SERVER_URL}"
+                await self.interaction_log_manager.append(msg)
+                self.show_footer_message(msg)
+                return
+            try:
+                self._voice_server_handle = await asyncio.to_thread(start_personaplex_server)
+                self.state["voice_mode"] = "server"
+                msg = (
+                    "Voice server started. Open PersonaPlex UI at "
+                    f"{PERSONAPLEX_SERVER_URL}"
+                )
+                await self.interaction_log_manager.append(msg)
+                self.show_footer_message(msg)
+            except Exception as e:
+                self.logger.error("Voice server start failed: %s", e)
+                self.show_footer_message(f"Voice server error: {str(e)[:100]}")
+            return
+        if cmd == "/voice-stop":
+            stop_personaplex_server(self._voice_server_handle)
+            self._voice_server_handle = None
+            self.state["voice_mode"] = "offline-disabled"
+            msg = "Voice server stopped."
+            await self.interaction_log_manager.append(msg)
+            self.show_footer_message(msg)
             return
         if cmd in {"/smoke", "/smoke-all"}:
             self.show_footer_message("Running deterministic smoke test...")
@@ -279,64 +342,18 @@ class TUIRenderer:
             await self.interaction_log_manager.append(model_summary)
             self.show_footer_message(model_summary)
             return
-        if cmd not in {"/smoke", "/smoke-all", "/quit", "/exit"}:
+        if cmd not in {
+            "/smoke",
+            "/smoke-all",
+            "/quit",
+            "/exit",
+            "/voice-start",
+            "/voice-stop",
+            "/voice-status",
+        }:
             msg = f"Unknown command: {command}. Try /help"
             await self.interaction_log_manager.append(msg)
             self.show_footer_message(msg)
-
-    async def handle_voice_input(self):
-        """Handles voice input using PersonaPlex."""
-        max_y, max_x = self.stdscr.getmaxyx()
-        try:
-            self.state["is_listening"] = True
-            self.render_status_bar()
-            self.show_footer_message(f"Recording voice for {VOICE_CAPTURE_SECONDS}s...")
-
-            with tempfile.TemporaryDirectory(prefix="agentbot_voice_") as tmpdir:
-                input_wav = os.path.join(tmpdir, "input.wav")
-                output_wav = os.path.join(tmpdir, "output.wav")
-                output_text = os.path.join(tmpdir, "output_text.json")
-
-                await asyncio.to_thread(
-                    capture_microphone_to_wav,
-                    input_wav,
-                    VOICE_CAPTURE_SECONDS,
-                    VOICE_SAMPLE_RATE,
-                )
-                self.show_footer_message("Processing PersonaPlex response...")
-
-                response = await asyncio.to_thread(
-                    run_personaplex_offline,
-                    input_wav,
-                    output_wav,
-                    output_text=output_text,
-                    voice_prompt=self.state.get(
-                        "voice_prompt", PERSONAPLEX_VOICE_PROMPT
-                    ),
-                    text_prompt=self.state.get(
-                        "persona_prompt", PERSONAPLEX_TEXT_PROMPT
-                    ),
-                )
-                await asyncio.to_thread(play_wav_file, output_wav)
-
-                generated_text = response.get("generated_text", "").strip()
-                if generated_text:
-                    await self.interaction_log_manager.append(
-                        f"Voice Response: {generated_text}"
-                    )
-                else:
-                    await self.interaction_log_manager.append(
-                        "Voice Response: [audio generated]"
-                    )
-
-                self.show_footer_message("Voice turn completed.")
-        except Exception as e:
-            self.logger.error(f"Voice input failed: {e}")
-            self.show_footer_message(f"Voice error: {str(e)[: max_x - 13]}")
-        finally:
-            self.state["is_listening"] = False
-            self.render_status_bar()
-            self.stdscr.refresh()
 
     def process_debug_queue(self):
         """Processes the debug queue."""
