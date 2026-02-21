@@ -5,16 +5,13 @@ import contextlib
 import json
 import os
 import sys
-from concurrent.futures import ThreadPoolExecutor
 from threading import Lock
 import logging
 
-from config import MODEL_PATH, MAX_WORKERS
+from config import MODEL_PATH
 from llama_cpp import Llama
 
 logger = logging.getLogger("autonomous_system.llama_model_manager")
-
-executor = ThreadPoolExecutor(max_workers=MAX_WORKERS)
 
 
 def _log_prompts_enabled() -> bool:
@@ -28,11 +25,12 @@ class LlamaModelManager:
     Simulates function calling as per Llama-3 specifications.
     """
 
-    def __init__(self, model_path=MODEL_PATH):
+    def __init__(self, model_path=MODEL_PATH, llm_executor=None):
         """Initializes the Llama model manager."""
         self.logger = logging.getLogger("autonomous_system.llama_model_manager")
         self.llm = Llama(model_path=model_path)
         self.llm_lock = Lock()
+        self.llm_executor = llm_executor
         self.llm_context = []
         self.context_limit = 512
         self.original_stderr = sys.stderr
@@ -97,7 +95,7 @@ Context:
 Notes:"""
         try:
             private_notes = await loop.run_in_executor(
-                executor, self.llm_call, analysis_prompt, 150
+                self.llm_executor, self.llm_call, analysis_prompt, 150
             )
             self.logger.debug(
                 "Generated private notes (chars=%s)", len(private_notes or "")
@@ -157,7 +155,7 @@ Otherwise, produce the {phase_name} text directly.
             len(self.llm_context),
         )
         response = await loop.run_in_executor(
-            executor, self.llm_call, internal_prompt, 512
+            self.llm_executor, self.llm_call, internal_prompt, 512
         )
         response = response.strip()
 

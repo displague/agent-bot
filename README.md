@@ -15,6 +15,7 @@ An autonomous AI agent system that interacts via text or voice, processes intera
 ## Architecture
 
 - `main.py`: Entry point; initializes and runs all components asynchronously using curses for TUI.
+- `runtime_manager.py`: Manages shared executors and tracked async tasks for graceful shutdown.
 - `tui_renderer.py`: Manages the curses-based TUI; handles rendering, input (text/voice), scrolling, and screen switching.
 - `interaction_processor.py`: Dequeues interactions, processes via `FunctionalAgent`, logs to files, indexes entries, and updates state.
 - `functional_agent.py`: Orchestrates multi-phase processing using `LlamaModelManager`.
@@ -105,6 +106,7 @@ personaplex/.venv/Scripts/python.exe -m moshi.offline --help
 - `AGENTBOT_DEV_MODE`: `1` disables autonomous background thought/compression tasks for rapid debugging.
 - `AGENTBOT_LOG_LEVEL`: default `INFO`; set to `DEBUG` for verbose diagnostics.
 - `AGENTBOT_LOG_PROMPTS`: set to `1` only when you need full prompt dumps for debugging.
+- `SHUTDOWN_GRACE_SECONDS`: timeout used for graceful shutdown before force-cancel.
 
 Log files:
 - `logs/app.log`: rotating diagnostics log.

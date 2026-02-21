@@ -33,11 +33,12 @@ class InteractionProcessor:
         self.index_manager = index_manager
         self.functional_agent = FunctionalAgent(self.llama_manager)
         self.logger = logging.getLogger("autonomous_system.interaction_processor")
+        self._stop_event = asyncio.Event()
 
     async def start(self):
         """Starts the interaction processing."""
         self.logger.debug("Starting interaction processing...")
-        while True:
+        while not self._stop_event.is_set():
             if not self.interaction_queue.empty():
                 try:
                     interaction = self.interaction_queue.get_nowait()
@@ -77,3 +78,6 @@ class InteractionProcessor:
                     self.state["is_processing"] = False
             else:
                 await asyncio.sleep(0.1)
+
+    def request_stop(self):
+        self._stop_event.set()

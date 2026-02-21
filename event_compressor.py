@@ -5,12 +5,14 @@ import json
 import os
 from datetime import datetime
 import logging
-from concurrent.futures import ThreadPoolExecutor
 
-from config import COMPRESSED_LOG_PATH, INTERACTION_LOG_PATH, MAX_WORKERS
+from config import (
+    COMPRESSED_LOG_PATH,
+    EVENT_COMPRESS_MAX_ENTRIES,
+    INTERACTION_LOG_PATH,
+)
 
 logger = logging.getLogger("autonomous_system.event_compressor")
-executor = ThreadPoolExecutor(max_workers=MAX_WORKERS)
 
 
 class EventCompressor:
@@ -18,9 +20,11 @@ class EventCompressor:
     Compresses events periodically, summarizing interactions for future training.
     """
 
-    def __init__(self, llama_manager, event_scheduler):
+    def __init__(self, llama_manager, event_scheduler, io_executor=None, state=None):
         self.llama_manager = llama_manager
         self.event_scheduler = event_scheduler
+        self.io_executor = io_executor
+        self.state = state or {}
         self.logger = logging.getLogger("autonomous_system.event_compressor")
 
     async def start(self):
@@ -33,6 +37,9 @@ class EventCompressor:
     async def compress_events(self):
         """Compresses events."""
         self.logger.debug("Starting event compression")
+        if self.state.get("is_processing", False):
+            self.logger.debug("Skipping compression while user interaction is processing.")
+            return
         if not os.path.exists(INTERACTION_LOG_PATH):
             self.logger.debug("No logs to compress.")
             return
@@ -52,6 +59,8 @@ class EventCompressor:
                     "Skipped %s malformed interaction log lines during compression",
                     skipped_lines,
                 )
+            if len(logs) > EVENT_COMPRESS_MAX_ENTRIES:
+                logs = logs[-EVENT_COMPRESS_MAX_ENTRIES:]
             if not logs:
                 self.logger.debug("No events to compress.")
                 return
@@ -74,7 +83,7 @@ class EventCompressor:
 Summary:"""
             loop = asyncio.get_event_loop()
             summary = await loop.run_in_executor(
-                executor, self.llama_manager.llm_call, prompt
+                self.io_executor, self.llama_manager.llm_call, prompt
             )
             self.logger.debug(f"Summary generated: {summary}")
 

@@ -8,19 +8,28 @@ logger = logging.getLogger("autonomous_system.event_scheduler")
 
 
 class EventScheduler:
-    def __init__(self, state, interaction_log_manager, index_manager):
+    def __init__(self, state, interaction_log_manager, index_manager, runtime_manager=None):
         self.event_queue = asyncio.Queue()
         self.state = state
         self.interaction_log_manager = interaction_log_manager
         self.index_manager = index_manager
+        self.runtime_manager = runtime_manager
+        self._active_tasks = set()
+        self._stop_event = asyncio.Event()
         self.logger = logging.getLogger("autonomous_system.event_scheduler")
 
     async def start(self):
         """Starts the event scheduler."""
         self.logger.debug("Starting event scheduler")
-        while True:
+        while not self._stop_event.is_set():
             event = await self.event_queue.get()
-            asyncio.create_task(self.handle_event(event))
+            if event is None:
+                continue
+            task = asyncio.create_task(self.handle_event(event))
+            self._active_tasks.add(task)
+            task.add_done_callback(self._active_tasks.discard)
+            if self.runtime_manager is not None:
+                self.runtime_manager.register_task(task)
             await asyncio.sleep(1)
 
     async def schedule_event(self, event):
@@ -61,3 +70,12 @@ class EventScheduler:
         self.state["next_event"] = (
             "Not scheduled" if self.event_queue.empty() else "Event pending"
         )
+
+    async def shutdown(self):
+        """Cancels in-flight scheduled event handlers."""
+        self._stop_event.set()
+        await self.event_queue.put(None)
+        for task in list(self._active_tasks):
+            task.cancel()
+        if self._active_tasks:
+            await asyncio.gather(*self._active_tasks, return_exceptions=True)

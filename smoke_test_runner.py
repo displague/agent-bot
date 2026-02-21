@@ -4,13 +4,11 @@ import os
 import time
 from datetime import datetime
 from typing import Any, Dict
-from concurrent.futures import ThreadPoolExecutor
 
 from config import SMOKE_LOG_PATH, SMOKE_MODEL_TIMEOUT_SECONDS
 
 SMOKE_REQUEST = "Hello, repeat after me, testing, testing, 1, 2, 3."
 SMOKE_EXPECTED_RESPONSE = "Testing, testing, 1, 2, 3."
-_SMOKE_EXECUTOR = ThreadPoolExecutor(max_workers=1)
 
 
 def _now_iso() -> str:
@@ -74,7 +72,7 @@ async def run_model_smoke(functional_agent) -> Dict[str, Any]:
                 "Testing, testing, 1, 2, 3."
             )
             response = await asyncio.wait_for(
-                loop.run_in_executor(_SMOKE_EXECUTOR, llama_manager.llm_call, smoke_prompt, 48),
+                loop.run_in_executor(None, llama_manager.llm_call, smoke_prompt, 48),
                 timeout=SMOKE_MODEL_TIMEOUT_SECONDS,
             )
         else:

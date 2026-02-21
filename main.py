@@ -9,6 +9,7 @@ from config import (
     INTERACTION_LOG_PATH,
     INTERACTION_LOG_WARN_BYTES,
     MODEL_PATH,
+    SHUTDOWN_GRACE_SECONDS,
 )
 from index_manager import IndexManager
 from interaction_log_manager import InteractionLogManager
@@ -18,6 +19,7 @@ from simple_renderer import SimpleRenderer
 from interaction_processor import InteractionProcessor
 from thought_generator import ThoughtGenerator
 from event_compressor import EventCompressor
+from runtime_manager import RuntimeManager
 
 
 def _env_enabled(name: str, default: bool = False) -> bool:
@@ -79,6 +81,7 @@ async def main(stdscr=None, renderer_name="auto", renderer_reason="", dev_mode=F
     logger.info("Starting application")
 
     # Initialize other components
+    runtime_manager = RuntimeManager(llm_workers=1, io_workers=2)
     state = {
         "unprocessed_interactions": 0,
         "ongoing_thoughts": 0,
@@ -100,7 +103,9 @@ async def main(stdscr=None, renderer_name="auto", renderer_reason="", dev_mode=F
         startup_lines.append(log_warning)
     _show_startup_status(stdscr, startup_lines)
 
-    llama_manager = LlamaModelManager(model_path=MODEL_PATH)
+    llama_manager = LlamaModelManager(
+        model_path=MODEL_PATH, llm_executor=runtime_manager.llm_executor
+    )
 
     _show_startup_status(
         stdscr,
@@ -113,7 +118,9 @@ async def main(stdscr=None, renderer_name="auto", renderer_reason="", dev_mode=F
 
     index_manager = IndexManager()
     interaction_log_manager = InteractionLogManager()
-    event_scheduler = EventScheduler(state, interaction_log_manager, index_manager)
+    event_scheduler = EventScheduler(
+        state, interaction_log_manager, index_manager, runtime_manager=runtime_manager
+    )
     interaction_processor = InteractionProcessor(
         interaction_queue, state, llama_manager, interaction_log_manager, index_manager
     )
@@ -137,17 +144,25 @@ async def main(stdscr=None, renderer_name="auto", renderer_reason="", dev_mode=F
     thought_generator = ThoughtGenerator(
         state, llama_manager, interaction_log_manager, event_scheduler
     )
-    event_compressor = EventCompressor(llama_manager, event_scheduler)
+    event_compressor = EventCompressor(
+        llama_manager,
+        event_scheduler,
+        io_executor=runtime_manager.io_executor,
+        state=state,
+    )
 
-    ui_task = asyncio.create_task(ui_renderer.start())
+    ui_task = runtime_manager.register_task(asyncio.create_task(ui_renderer.start()))
     background_tasks = [
-        asyncio.create_task(event_scheduler.start()),
-        asyncio.create_task(interaction_processor.start()),
+        runtime_manager.register_task(asyncio.create_task(event_scheduler.start())),
+        runtime_manager.register_task(asyncio.create_task(interaction_processor.start())),
     ]
     if not dev_mode:
-        background_tasks.append(asyncio.create_task(thought_generator.start()))
-        background_tasks.append(asyncio.create_task(event_compressor.start()))
-    tasks = [ui_task, *background_tasks]
+        background_tasks.append(
+            runtime_manager.register_task(asyncio.create_task(thought_generator.start()))
+        )
+        background_tasks.append(
+            runtime_manager.register_task(asyncio.create_task(event_compressor.start()))
+        )
 
     try:
         await ui_task
@@ -166,9 +181,19 @@ async def main(stdscr=None, renderer_name="auto", renderer_reason="", dev_mode=F
             flush=True,
         )
     finally:
+        interaction_processor.request_stop()
+        thought_generator.request_stop()
+        await event_scheduler.shutdown()
         for task in background_tasks:
             task.cancel()
-        await asyncio.gather(*background_tasks, return_exceptions=True)
+        done, pending = await asyncio.wait(
+            background_tasks, timeout=SHUTDOWN_GRACE_SECONDS
+        )
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
+        await runtime_manager.cancel_all_tasks(timeout_seconds=SHUTDOWN_GRACE_SECONDS)
+        runtime_manager.shutdown_executors()
         restore_stderr(backup, f)  # Pass backup and f to restore_stderr
         logger.info("Application stopped")
 

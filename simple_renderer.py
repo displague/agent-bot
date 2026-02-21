@@ -1,6 +1,7 @@
 import asyncio
 import logging
 
+from config import VOICE_CAPTURE_KEY_LABEL
 from smoke_test_runner import (
     run_deterministic_smoke,
     run_model_smoke,
@@ -84,7 +85,7 @@ class SimpleRenderer:
             return
         if cmd == "/help":
             print("Commands: /help, /smoke, /smoke-model, /smoke-all, /quit")
-            print("Voice capture is available in curses mode via Ctrl+V.")
+            print(f"Voice capture is available in curses mode via {VOICE_CAPTURE_KEY_LABEL}.")
             return
         if cmd in {"/smoke", "/smoke-all"}:
             deterministic_result = await run_deterministic_smoke()
