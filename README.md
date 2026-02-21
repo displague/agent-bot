@@ -115,6 +115,7 @@ Log files:
 - `logs/app.log`: rotating diagnostics log.
 - `logs/hard_log.jsonl`: structured interaction records only.
 - `logs/smoke_test.jsonl`: smoke test evidence.
+- `logs/personaplex_server.log`: PersonaPlex server stdout/stderr for voice startup/runtime failures.
 
 ## Development
 

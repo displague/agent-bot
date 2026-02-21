@@ -5,6 +5,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -12,6 +13,7 @@ import numpy as np
 import soundfile as sf
 
 from config import (
+    PERSONAPLEX_SERVER_LOG_PATH,
     PERSONAPLEX_CPU_OFFLOAD,
     PERSONAPLEX_DEVICE,
     PERSONAPLEX_OFFLINE_TIMEOUT_SECONDS,
@@ -31,9 +33,11 @@ logger = logging.getLogger("autonomous_system.utils")
 
 
 class PersonaPlexServerHandle:
-    def __init__(self, process: subprocess.Popen, ssl_dir: str):
+    def __init__(self, process: subprocess.Popen, ssl_dir: str, log_path: str, log_file):
         self.process = process
         self.ssl_dir = ssl_dir
+        self.log_path = log_path
+        self.log_file = log_file
 
 
 def extract_text_features(text: str) -> Dict[str, Any]:
@@ -179,7 +183,14 @@ def run_personaplex_offline(
 
 def start_personaplex_server(cpu_offload: bool = PERSONAPLEX_CPU_OFFLOAD) -> PersonaPlexServerHandle:
     """Start PersonaPlex server mode for full-duplex interaction."""
+    if not os.getenv("HF_TOKEN"):
+        raise RuntimeError("HF_TOKEN is not set. Set it in environment/.env before starting voice server.")
+
     ssl_dir = tempfile.mkdtemp(prefix="personaplex_ssl_")
+    os.makedirs(os.path.dirname(PERSONAPLEX_SERVER_LOG_PATH), exist_ok=True)
+    log_file = open(PERSONAPLEX_SERVER_LOG_PATH, "a", encoding="utf-8")
+    log_file.write("\n=== Starting PersonaPlex server ===\n")
+    log_file.flush()
     command = [
         _resolve_personaplex_python(),
         "-m",
@@ -192,11 +203,30 @@ def start_personaplex_server(cpu_offload: bool = PERSONAPLEX_CPU_OFFLOAD) -> Per
     logger.info("Starting PersonaPlex server mode.")
     process = subprocess.Popen(
         command,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stdout=log_file,
+        stderr=subprocess.STDOUT,
         env=os.environ.copy(),
     )
-    return PersonaPlexServerHandle(process=process, ssl_dir=ssl_dir)
+    time.sleep(1.5)
+    if process.poll() is not None:
+        try:
+            with open(PERSONAPLEX_SERVER_LOG_PATH, "r", encoding="utf-8", errors="replace") as f:
+                tail = "".join(f.readlines()[-20:]).strip()
+        except Exception:
+            tail = ""
+        log_file.close()
+        shutil.rmtree(ssl_dir, ignore_errors=True)
+        detail = f" Exit code: {process.returncode}."
+        if tail:
+            detail += f" Server log tail: {tail}"
+        raise RuntimeError("PersonaPlex server exited during startup." + detail)
+
+    return PersonaPlexServerHandle(
+        process=process,
+        ssl_dir=ssl_dir,
+        log_path=PERSONAPLEX_SERVER_LOG_PATH,
+        log_file=log_file,
+    )
 
 
 def stop_personaplex_server(handle: Optional[PersonaPlexServerHandle]) -> None:
@@ -212,6 +242,11 @@ def stop_personaplex_server(handle: Optional[PersonaPlexServerHandle]) -> None:
                 handle.process.kill()
                 handle.process.wait(timeout=5)
     finally:
+        if getattr(handle, "log_file", None):
+            try:
+                handle.log_file.close()
+            except Exception:
+                pass
         shutil.rmtree(handle.ssl_dir, ignore_errors=True)
 
 

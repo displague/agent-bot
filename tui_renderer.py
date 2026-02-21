@@ -341,9 +341,14 @@ class TUIRenderer:
                 self._voice_server_handle is not None
                 and self._voice_server_handle.process.poll() is None
             )
+            log_hint = (
+                f" log={self._voice_server_handle.log_path}"
+                if active and self._voice_server_handle is not None
+                else ""
+            )
             msg = (
                 f"Voice server: {'running' if active else 'stopped'} "
-                f"({PERSONAPLEX_SERVER_URL})"
+                f"({PERSONAPLEX_SERVER_URL}){log_hint}"
             )
             self.state["voice_server_state"] = "running" if active else "stopped"
             self.state["voice_session_state"] = "unknown" if active else "disconnected"
@@ -387,6 +392,7 @@ class TUIRenderer:
                 )
             except Exception as e:
                 self.logger.error("Voice server start failed: %s", e)
+                self.state["voice_mode"] = "server-error"
                 await self._set_voice_state(
                     server="error",
                     session="disconnected",

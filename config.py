@@ -3,6 +3,7 @@
 APP_LOG_PATH = "logs/app.log"
 INTERACTION_LOG_PATH = "logs/hard_log.jsonl"
 HARD_LOG_PATH = INTERACTION_LOG_PATH  # Backward-compat alias
+PERSONAPLEX_SERVER_LOG_PATH = "logs/personaplex_server.log"
 SMOKE_LOG_PATH = "logs/smoke_test.jsonl"
 COMPRESSED_LOG_PATH = "compressed_logs/compressed_log.jsonl"
 INDEX_PATH = "index/context_index.json"
