@@ -12,6 +12,8 @@ from config import (
     PERSONAPLEX_TEXT_PROMPT,
     PERSONAPLEX_VOICE_PROMPT,
     VOICE_CAPTURE_SECONDS,
+    VOICE_CAPTURE_KEY_CODE,
+    VOICE_CAPTURE_KEY_LABEL,
     VOICE_SAMPLE_RATE,
 )
 from smoke_test_runner import (
@@ -57,7 +59,7 @@ class TUIRenderer:
         curses.curs_set(1)
         self.stdscr.nodelay(True)
         await self.interaction_log_manager.append(
-            "Type /help for commands. Ctrl+V records voice. Esc toggles debug."
+            f"Type /help for commands. {VOICE_CAPTURE_KEY_LABEL} records voice. Esc toggles debug."
         )
         while True:
             await self.render()
@@ -159,7 +161,7 @@ class TUIRenderer:
             self.active_screen = 2 if self.active_screen == 1 else 1
         elif key == curses.KEY_BACKSPACE or key == 127:  # Backspace or delete
             self.input_buffer = self.input_buffer[:-1]
-        elif key == 22:  # Ctrl+V for voice input
+        elif key == VOICE_CAPTURE_KEY_CODE:
             await self.handle_voice_input()
         elif key in (curses.KEY_ENTER, 10, 13):  # Enter key
             if self.input_buffer.strip():
@@ -209,7 +211,7 @@ class TUIRenderer:
         cmd = command.strip().lower()
         if cmd == "/help":
             await self.interaction_log_manager.append(
-                "Commands: /help, /smoke, /smoke-model, /smoke-all"
+                f"Commands: /help, /smoke, /smoke-model, /smoke-all. Voice: {VOICE_CAPTURE_KEY_LABEL}"
             )
             self.show_footer_message("Command help added to log.")
             return
