@@ -14,18 +14,31 @@ from config import (
     VOICE_CAPTURE_SECONDS,
     VOICE_SAMPLE_RATE,
 )
+from smoke_test_runner import (
+    run_deterministic_smoke,
+    run_model_smoke,
+    summarize_smoke_result,
+)
 from utils import capture_microphone_to_wav, play_wav_file, run_personaplex_offline
 
 logger = logging.getLogger("autonomous_system.tui_renderer")
 
 
 class TUIRenderer:
-    def __init__(self, stdscr, state, interaction_queue, interaction_log_manager):
+    def __init__(
+        self,
+        stdscr,
+        state,
+        interaction_queue,
+        interaction_log_manager,
+        functional_agent=None,
+    ):
         self.logger = logging.getLogger("autonomous_system.tui_renderer")
         self.stdscr = stdscr
         self.state = state
         self.interaction_queue = interaction_queue
         self.interaction_log_manager = interaction_log_manager
+        self.functional_agent = functional_agent
         self.debug_queue = Queue()
         self.active_screen = 1
         self.input_buffer = ""
@@ -125,6 +138,12 @@ class TUIRenderer:
         self.stdscr.addstr(max_y - 2, 0, "Input: " + self.input_buffer[: max_x - 7])
         self.stdscr.clrtoeol()
 
+    def show_footer_message(self, message: str):
+        max_y, max_x = self.stdscr.getmaxyx()
+        self.stdscr.addstr(max_y - 1, 0, message[: max_x - 1])
+        self.stdscr.clrtoeol()
+        self.stdscr.refresh()
+
     async def handle_input(self):
         """Handles user input."""
         key = self.stdscr.getch()
@@ -138,15 +157,20 @@ class TUIRenderer:
             await self.handle_voice_input()
         elif key in (curses.KEY_ENTER, 10, 13):  # Enter key
             if self.input_buffer.strip():
-                self.interaction_queue.put_nowait(
-                    {
-                        "input": self.input_buffer,
-                        "private_notes": "",
-                        "audio_waveform": self.audio_waveform,
-                    }
-                )
-                self.state["unprocessed_interactions"] += 1
-                await self.interaction_log_manager.append(f"Input: {self.input_buffer}")
+                if self.input_buffer.startswith("/"):
+                    await self.handle_command(self.input_buffer)
+                else:
+                    self.interaction_queue.put_nowait(
+                        {
+                            "input": self.input_buffer,
+                            "private_notes": "",
+                            "audio_waveform": self.audio_waveform,
+                        }
+                    )
+                    self.state["unprocessed_interactions"] += 1
+                    await self.interaction_log_manager.append(
+                        f"Input: {self.input_buffer}"
+                    )
                 self.input_buffer = ""
         elif key == curses.KEY_UP:
             max_log_length = (
@@ -163,19 +187,44 @@ class TUIRenderer:
         self.render_input_line()
         self.stdscr.refresh()
 
+    async def handle_command(self, command: str):
+        cmd = command.strip().lower()
+        if cmd == "/help":
+            await self.interaction_log_manager.append(
+                "Commands: /help, /smoke, /smoke-model, /smoke-all"
+            )
+            self.show_footer_message("Command help added to log.")
+            return
+        if cmd in {"/smoke", "/smoke-all"}:
+            self.show_footer_message("Running deterministic smoke test...")
+            deterministic_result = await run_deterministic_smoke()
+            deterministic_summary = summarize_smoke_result(deterministic_result)
+            await self.interaction_log_manager.append(deterministic_summary)
+            self.show_footer_message(deterministic_summary)
+        if cmd in {"/smoke-model", "/smoke-all"}:
+            if self.functional_agent is None:
+                msg = "SMOKE model: FAIL functional agent unavailable"
+                await self.interaction_log_manager.append(msg)
+                self.show_footer_message(msg)
+                return
+            self.show_footer_message("Running model smoke test...")
+            model_result = await run_model_smoke(self.functional_agent)
+            model_summary = summarize_smoke_result(model_result)
+            await self.interaction_log_manager.append(model_summary)
+            self.show_footer_message(model_summary)
+            return
+        if cmd not in {"/smoke", "/smoke-all"}:
+            msg = f"Unknown command: {command}. Try /help"
+            await self.interaction_log_manager.append(msg)
+            self.show_footer_message(msg)
+
     async def handle_voice_input(self):
         """Handles voice input using PersonaPlex."""
         max_y, max_x = self.stdscr.getmaxyx()
         try:
             self.state["is_listening"] = True
             self.render_status_bar()
-            self.stdscr.addstr(
-                max_y - 1,
-                0,
-                f"Recording voice for {VOICE_CAPTURE_SECONDS}s...",
-            )
-            self.stdscr.clrtoeol()
-            self.stdscr.refresh()
+            self.show_footer_message(f"Recording voice for {VOICE_CAPTURE_SECONDS}s...")
 
             with tempfile.TemporaryDirectory(prefix="agentbot_voice_") as tmpdir:
                 input_wav = os.path.join(tmpdir, "input.wav")
@@ -188,9 +237,7 @@ class TUIRenderer:
                     VOICE_CAPTURE_SECONDS,
                     VOICE_SAMPLE_RATE,
                 )
-                self.stdscr.addstr(max_y - 1, 0, "Processing PersonaPlex response...")
-                self.stdscr.clrtoeol()
-                self.stdscr.refresh()
+                self.show_footer_message("Processing PersonaPlex response...")
 
                 response = await asyncio.to_thread(
                     run_personaplex_offline,
@@ -216,12 +263,10 @@ class TUIRenderer:
                         "Voice Response: [audio generated]"
                     )
 
-                self.stdscr.addstr(max_y - 1, 0, "Voice turn completed.")
-                self.stdscr.clrtoeol()
+                self.show_footer_message("Voice turn completed.")
         except Exception as e:
             self.logger.error(f"Voice input failed: {e}")
-            self.stdscr.addstr(max_y - 1, 0, f"Voice error: {str(e)[: max_x - 13]}")
-            self.stdscr.clrtoeol()
+            self.show_footer_message(f"Voice error: {str(e)[: max_x - 13]}")
         finally:
             self.state["is_listening"] = False
             self.render_status_bar()

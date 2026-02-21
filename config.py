@@ -1,6 +1,7 @@
 # config.py
 
 HARD_LOG_PATH = "logs/hard_log.jsonl"
+SMOKE_LOG_PATH = "logs/smoke_test.jsonl"
 COMPRESSED_LOG_PATH = "compressed_logs/compressed_log.jsonl"
 INDEX_PATH = "index/context_index.json"
 DAILY_SLEEP_START = 23
@@ -19,7 +20,11 @@ PERSONAPLEX_DEVICE = "cuda"
 PERSONAPLEX_CPU_OFFLOAD = False
 PERSONAPLEX_OFFLINE_TIMEOUT_SECONDS = 900
 PERSONAPLEX_PYTHON_BIN = ""
+SMOKE_MODEL_TIMEOUT_SECONDS = 30
 
 # Local voice I/O settings
 VOICE_CAPTURE_SECONDS = 6
 VOICE_SAMPLE_RATE = 24000
+
+# Development/runtime controls
+DEV_DISABLE_AUTONOMOUS = False

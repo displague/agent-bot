@@ -1,9 +1,11 @@
 import asyncio
+import os
+import sys
 from concurrent.futures import ThreadPoolExecutor
 
 # Import modules
 from logging_setup import setup_logging
-from config import MAX_WORKERS, MODEL_PATH
+from config import DEV_DISABLE_AUTONOMOUS, MAX_WORKERS, MODEL_PATH
 from index_manager import IndexManager
 from interaction_log_manager import InteractionLogManager
 from llama_model_manager import LlamaModelManager
@@ -15,7 +17,44 @@ from thought_generator import ThoughtGenerator
 from event_compressor import EventCompressor
 
 
-async def main(stdscr=None):
+def _env_enabled(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _resolve_ui_mode() -> str:
+    mode = os.getenv("AGENTBOT_UI_MODE", "auto").strip().lower()
+    if mode not in {"auto", "simple", "curses"}:
+        return "auto"
+    return mode
+
+
+def _check_curses_available():
+    try:
+        import curses  # noqa: PLC0415
+    except Exception as exc:
+        return False, None, f"import failed: {exc}"
+    if not sys.stdin.isatty() or not sys.stdout.isatty():
+        return False, curses, "stdin/stdout is not a TTY"
+    return True, curses, ""
+
+
+def _show_startup_status(stdscr, lines):
+    if stdscr is None:
+        for line in lines:
+            print(line, flush=True)
+        return
+    stdscr.clear()
+    _, max_x = stdscr.getmaxyx()
+    for idx, line in enumerate(lines):
+        stdscr.addstr(idx, 0, line[: max_x - 1])
+        stdscr.clrtoeol()
+    stdscr.refresh()
+
+
+async def main(stdscr=None, renderer_name="auto", renderer_reason="", dev_mode=False):
     # Initialize logging
     redirect_stderr, restore_stderr, logger = setup_logging()
     backup, f = redirect_stderr()  # Get backup and file object from redirect_stderr
@@ -31,34 +70,49 @@ async def main(stdscr=None):
     }
     interaction_queue = asyncio.Queue()
 
-    if stdscr is not None:
-        stdscr.clear()
-        stdscr.addstr(0, 0, "Loading model... please wait.")
-        stdscr.refresh()
-    else:
-        print("Loading model... please wait.", flush=True)
+    startup_lines = [
+        "Agent-Bot: interactive autonomous assistant with voice and scheduled tasks.",
+        f"Renderer: {renderer_name}" + (f" ({renderer_reason})" if renderer_reason else ""),
+        "Loading model... please wait.",
+    ]
+    if dev_mode:
+        startup_lines.append("Development mode: autonomous background tasks disabled.")
+    _show_startup_status(stdscr, startup_lines)
 
     llama_manager = LlamaModelManager(model_path=MODEL_PATH)
 
-    if stdscr is not None:
-        stdscr.clear()
-        stdscr.addstr(0, 0, "Model loaded. Starting UI...")
-        stdscr.refresh()
-    else:
-        print("Model loaded. Starting UI...", flush=True)
+    _show_startup_status(
+        stdscr,
+        [
+            "Agent-Bot: interactive autonomous assistant with voice and scheduled tasks.",
+            f"Renderer: {renderer_name}" + (f" ({renderer_reason})" if renderer_reason else ""),
+            "Model loaded. Starting UI...",
+        ],
+    )
 
     index_manager = IndexManager()
     interaction_log_manager = InteractionLogManager()
     event_scheduler = EventScheduler(state, interaction_log_manager, index_manager)
-    if stdscr is not None:
-        from tui_renderer import TUIRenderer  # noqa: PLC0415
-
-        ui_renderer = TUIRenderer(stdscr, state, interaction_queue, interaction_log_manager)
-    else:
-        ui_renderer = SimpleRenderer(state, interaction_queue, interaction_log_manager)
     interaction_processor = InteractionProcessor(
         interaction_queue, state, llama_manager, interaction_log_manager, index_manager
     )
+    if stdscr is not None:
+        from tui_renderer import TUIRenderer  # noqa: PLC0415
+
+        ui_renderer = TUIRenderer(
+            stdscr,
+            state,
+            interaction_queue,
+            interaction_log_manager,
+            functional_agent=interaction_processor.functional_agent,
+        )
+    else:
+        ui_renderer = SimpleRenderer(
+            state,
+            interaction_queue,
+            interaction_log_manager,
+            functional_agent=interaction_processor.functional_agent,
+        )
     thought_generator = ThoughtGenerator(
         state, llama_manager, interaction_log_manager, event_scheduler
     )
@@ -69,9 +123,10 @@ async def main(stdscr=None):
         asyncio.create_task(ui_renderer.start()),
         asyncio.create_task(event_scheduler.start()),
         asyncio.create_task(interaction_processor.start()),
-        asyncio.create_task(thought_generator.start()),
-        asyncio.create_task(event_compressor.start()),
     ]
+    if not dev_mode:
+        tasks.append(asyncio.create_task(thought_generator.start()))
+        tasks.append(asyncio.create_task(event_compressor.start()))
 
     try:
         await asyncio.gather(*tasks)
@@ -90,12 +145,56 @@ if __name__ == "__main__":
     redirect_stderr, restore_stderr, logger = setup_logging()
     backup, f = redirect_stderr()  # Store the file object
     try:
-        try:
-            import curses  # noqa: PLC0415
-        except Exception:
-            asyncio.run(main(None))
+        ui_mode = _resolve_ui_mode()
+        dev_mode = _env_enabled("AGENTBOT_DEV_MODE", default=DEV_DISABLE_AUTONOMOUS)
+        curses_ok, curses_mod, reason = _check_curses_available()
+
+        if ui_mode == "simple":
+            asyncio.run(
+                main(
+                    None,
+                    renderer_name="simple",
+                    renderer_reason="forced by AGENTBOT_UI_MODE=simple",
+                    dev_mode=dev_mode,
+                )
+            )
+        elif ui_mode == "curses":
+            if not curses_ok:
+                raise RuntimeError(
+                    f"Curses mode requested but unavailable: {reason}. "
+                    "Use AGENTBOT_UI_MODE=simple."
+                )
+            curses_mod.wrapper(
+                lambda stdscr: asyncio.run(
+                    main(
+                        stdscr,
+                        renderer_name="curses",
+                        renderer_reason="forced by AGENTBOT_UI_MODE=curses",
+                        dev_mode=dev_mode,
+                    )
+                )
+            )
         else:
-            curses.wrapper(lambda stdscr: asyncio.run(main(stdscr)))
+            if curses_ok:
+                curses_mod.wrapper(
+                    lambda stdscr: asyncio.run(
+                        main(
+                            stdscr,
+                            renderer_name="curses",
+                            renderer_reason="auto",
+                            dev_mode=dev_mode,
+                        )
+                    )
+                )
+            else:
+                asyncio.run(
+                    main(
+                        None,
+                        renderer_name="simple",
+                        renderer_reason=f"auto fallback: {reason}",
+                        dev_mode=dev_mode,
+                    )
+                )
     except Exception as e:
         print(f"An error occurred: {e}")
     finally:

@@ -73,6 +73,20 @@ An autonomous AI agent system that interacts via text or voice, processes intera
 python main.py
 ```
 
+Quick first-run validation:
+1. Start with simple UI to avoid terminal/curses issues:
+   ```bash
+   # PowerShell
+   $env:AGENTBOT_UI_MODE='simple'; $env:AGENTBOT_DEV_MODE='1'; python main.py
+   ```
+2. At the prompt, run:
+   - `/help`
+   - `/smoke`
+   - `/smoke-model`
+   - or `/smoke-all`
+3. Verify evidence in:
+   - `logs/smoke_test.jsonl`
+
 Use Ctrl+V in TUI for voice input via PersonaPlex.
 If curses is unavailable (for example on native Windows Python), the app falls back to a simple stdin mode automatically.
 
@@ -85,6 +99,8 @@ personaplex/.venv/Scripts/python.exe -m moshi.offline --help
 
 - `config.py`: Adjust paths, sleep hours (11 PM - 7 AM), worker count (5), model settings.
 - Voice/Persona: Configure in `utils.py` or TUI for PersonaPlex prompts.
+- `AGENTBOT_UI_MODE`: `auto` (default), `simple`, or `curses`.
+- `AGENTBOT_DEV_MODE`: `1` disables autonomous background thought/compression tasks for rapid debugging.
 
 ## Development
 
