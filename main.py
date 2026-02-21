@@ -1,6 +1,7 @@
 import asyncio
 import os
 import sys
+from pathlib import Path
 
 # Import modules
 from logging_setup import setup_logging
@@ -21,12 +22,25 @@ from thought_generator import ThoughtGenerator
 from event_compressor import EventCompressor
 from runtime_manager import RuntimeManager
 
+try:
+    from dotenv import load_dotenv
+except Exception:  # pragma: no cover - optional at runtime
+    load_dotenv = None
+
 
 def _env_enabled(name: str, default: bool = False) -> bool:
     value = os.getenv(name)
     if value is None:
         return default
     return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _load_environment():
+    if load_dotenv is None:
+        return
+    env_path = Path(".env")
+    if env_path.exists():
+        load_dotenv(dotenv_path=env_path, override=False)
 
 
 def _resolve_ui_mode() -> str:
@@ -199,6 +213,7 @@ async def main(stdscr=None, renderer_name="auto", renderer_reason="", dev_mode=F
 
 
 if __name__ == "__main__":
+    _load_environment()
     redirect_stderr, restore_stderr, logger = setup_logging()
     backup, f = redirect_stderr()  # Store the file object
     try:

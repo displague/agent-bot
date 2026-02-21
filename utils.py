@@ -28,6 +28,10 @@ try:
     import sounddevice as sd
 except Exception:  # pragma: no cover - dependency may be optional at runtime
     sd = None
+try:
+    from dotenv import load_dotenv
+except Exception:  # pragma: no cover - dependency may be optional at runtime
+    load_dotenv = None
 
 logger = logging.getLogger("autonomous_system.utils")
 
@@ -112,6 +116,14 @@ def _resolve_personaplex_python() -> str:
     return sys.executable
 
 
+def _load_env_if_present() -> None:
+    if load_dotenv is None:
+        return
+    env_path = Path(".env")
+    if env_path.exists():
+        load_dotenv(dotenv_path=env_path, override=False)
+
+
 def run_personaplex_offline(
     input_wav: str,
     output_wav: str,
@@ -126,6 +138,7 @@ def run_personaplex_offline(
     seed: int = 42424242,
 ) -> Dict[str, Any]:
     """Run PersonaPlex offline inference through moshi.offline CLI."""
+    _load_env_if_present()
     if output_text is None:
         output_text = os.path.join(tempfile.gettempdir(), "personaplex_output_text.json")
 
@@ -183,6 +196,7 @@ def run_personaplex_offline(
 
 def start_personaplex_server(cpu_offload: bool = PERSONAPLEX_CPU_OFFLOAD) -> PersonaPlexServerHandle:
     """Start PersonaPlex server mode for full-duplex interaction."""
+    _load_env_if_present()
     if not os.getenv("HF_TOKEN"):
         raise RuntimeError("HF_TOKEN is not set. Set it in environment/.env before starting voice server.")
 
