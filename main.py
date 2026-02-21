@@ -252,6 +252,8 @@ if __name__ == "__main__":
                         dev_mode=dev_mode,
                     )
                 )
+    except KeyboardInterrupt:
+        print("Interrupted by Ctrl+C. Shutting down...", flush=True)
     except Exception as e:
         print(f"An error occurred: {e}")
     finally:

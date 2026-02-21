@@ -27,7 +27,7 @@ logger = logging.getLogger("autonomous_system.tui_renderer")
 
 
 class TUIRenderer:
-    COMMANDS = ["/help", "/smoke", "/smoke-model", "/smoke-all"]
+    COMMANDS = ["/help", "/smoke", "/smoke-model", "/smoke-all", "/quit", "/exit"]
 
     def __init__(
         self,
@@ -49,6 +49,8 @@ class TUIRenderer:
         self.debug_log = []
         self.scroll_offset = 0
         self.audio_waveform = None
+        self._stop = False
+        self._refresh_interval_seconds = 0.2
         self.state.setdefault("is_listening", False)
         self.state.setdefault("voice_prompt", PERSONAPLEX_VOICE_PROMPT)
         self.state.setdefault("persona_prompt", PERSONAPLEX_TEXT_PROMPT)
@@ -61,14 +63,27 @@ class TUIRenderer:
         await self.interaction_log_manager.append(
             f"Type /help for commands. {VOICE_CAPTURE_KEY_LABEL} records voice. Esc toggles debug."
         )
-        while True:
+        while not self._stop:
             try:
                 await self.render()
             except Exception as e:
                 self.logger.exception("TUI render loop error: %s", e)
                 self.show_footer_message(f"TUI error: {str(e)[:120]}")
                 await self.interaction_log_manager.append(f"TUI error: {e}")
-            await asyncio.sleep(0.1)
+            await asyncio.sleep(self._refresh_interval_seconds)
+
+    def _safe_addstr(self, y, x, text, attr=0):
+        max_y, max_x = self.stdscr.getmaxyx()
+        if y < 0 or x < 0 or y >= max_y or max_x <= 1:
+            return
+        clipped = (text or "")[: max_x - x - 1]
+        try:
+            if attr:
+                self.stdscr.addstr(y, x, clipped, attr)
+            else:
+                self.stdscr.addstr(y, x, clipped)
+        except curses.error:
+            return
 
     def render_status_bar(self):
         """Renders the status bar."""
@@ -81,12 +96,18 @@ class TUIRenderer:
             f"| Thoughts: {self.state['ongoing_thoughts']} | Next event: {self.state['next_event']} "
             f"| Voice: {self.state.get('voice_prompt', PERSONAPLEX_VOICE_PROMPT)} "
         )
-        self.stdscr.addstr(0, 0, status_bar[:max_x], curses.A_REVERSE)
-        self.stdscr.clrtoeol()
+        self._safe_addstr(0, 0, status_bar[:max_x], curses.A_REVERSE)
+        try:
+            self.stdscr.clrtoeol()
+        except curses.error:
+            pass
 
     async def render(self):
         """Renders the main screen or debug screen."""
-        self.stdscr.clear()
+        try:
+            self.stdscr.erase()
+        except curses.error:
+            pass
         self.render_status_bar()
 
         if self.active_screen == 1:
@@ -95,7 +116,10 @@ class TUIRenderer:
             self.render_debug_screen()
 
         self.render_input_line()
-        self.stdscr.refresh()
+        try:
+            self.stdscr.refresh()
+        except curses.error:
+            pass
 
         await self.handle_input()
         self.process_debug_queue()
@@ -110,7 +134,7 @@ class TUIRenderer:
             for line in wrapped_thought:
                 if current_y >= max_y - 3:
                     break
-                self.stdscr.addstr(current_y, 0, line)
+                self._safe_addstr(current_y, 0, line)
                 current_y += 1
 
         max_log_lines = max_y - current_y - 3
@@ -124,7 +148,7 @@ class TUIRenderer:
             for line in wrapped_interaction:
                 if current_y >= max_y - 3:
                     break
-                self.stdscr.addstr(current_y, 0, line)
+                self._safe_addstr(current_y, 0, line)
                 current_y += 1
 
     def render_debug_screen(self):
@@ -142,20 +166,26 @@ class TUIRenderer:
             for line in wrapped_debug:
                 if current_y >= max_y - 3:
                     break
-                self.stdscr.addstr(current_y, 0, line)
+                self._safe_addstr(current_y, 0, line)
                 current_y += 1
 
     def render_input_line(self):
         """Renders the input line."""
         max_y, max_x = self.stdscr.getmaxyx()
-        self.stdscr.addstr(max_y - 2, 0, "Input: " + self.input_buffer[: max_x - 7])
-        self.stdscr.clrtoeol()
+        self._safe_addstr(max_y - 2, 0, "Input: " + self.input_buffer[: max_x - 7])
+        try:
+            self.stdscr.clrtoeol()
+        except curses.error:
+            pass
 
     def show_footer_message(self, message: str):
         max_y, max_x = self.stdscr.getmaxyx()
-        self.stdscr.addstr(max_y - 1, 0, message[: max_x - 1])
-        self.stdscr.clrtoeol()
-        self.stdscr.refresh()
+        self._safe_addstr(max_y - 1, 0, message[: max_x - 1])
+        try:
+            self.stdscr.clrtoeol()
+            self.stdscr.refresh()
+        except curses.error:
+            pass
 
     async def handle_input(self):
         """Handles user input."""
@@ -170,7 +200,10 @@ class TUIRenderer:
             await self.handle_voice_input()
         elif key in (curses.KEY_ENTER, 10, 13):  # Enter key
             if self.input_buffer.strip():
-                if self.input_buffer.startswith("/"):
+                normalized = self.input_buffer.strip().lower()
+                if normalized in {"quit", "exit"}:
+                    await self.handle_command("/quit")
+                elif self.input_buffer.startswith("/"):
                     await self.handle_command(self.input_buffer)
                 else:
                     self.interaction_queue.put_nowait(
@@ -200,7 +233,10 @@ class TUIRenderer:
             self.input_buffer += chr(key)
 
         self.render_input_line()
-        self.stdscr.refresh()
+        try:
+            self.stdscr.refresh()
+        except curses.error:
+            pass
 
     def autocomplete_command(self):
         prefix = self.input_buffer.strip().lower()
@@ -214,9 +250,14 @@ class TUIRenderer:
 
     async def handle_command(self, command: str):
         cmd = command.strip().lower()
+        if cmd in {"/quit", "/exit"}:
+            await self.interaction_log_manager.append("Shutting down...")
+            self.show_footer_message("Shutting down...")
+            self._stop = True
+            return
         if cmd == "/help":
             await self.interaction_log_manager.append(
-                f"Commands: /help, /smoke, /smoke-model, /smoke-all. Voice: {VOICE_CAPTURE_KEY_LABEL}"
+                f"Commands: /help, /smoke, /smoke-model, /smoke-all, /quit. Voice: {VOICE_CAPTURE_KEY_LABEL}"
             )
             self.show_footer_message("Command help added to log.")
             return
@@ -238,7 +279,7 @@ class TUIRenderer:
             await self.interaction_log_manager.append(model_summary)
             self.show_footer_message(model_summary)
             return
-        if cmd not in {"/smoke", "/smoke-all"}:
+        if cmd not in {"/smoke", "/smoke-all", "/quit", "/exit"}:
             msg = f"Unknown command: {command}. Try /help"
             await self.interaction_log_manager.append(msg)
             self.show_footer_message(msg)
