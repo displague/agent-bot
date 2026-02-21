@@ -25,34 +25,57 @@ class SimpleRenderer:
         self.interaction_log_manager = interaction_log_manager
         self.functional_agent = functional_agent
         self._stop = False
+        self._last_log_offset = 0
+        self._log_pump_task = None
 
     async def start(self):
-        print("Simple mode active (no curses). Type /quit to exit.")
+        print("Simple mode active (no curses).")
+        print("Type /help for commands. Type /quit to exit.")
+        self._log_pump_task = asyncio.create_task(self._pump_logs())
+        try:
+            while not self._stop:
+                try:
+                    line = await asyncio.to_thread(input, "Input> ")
+                    if not line:
+                        continue
+                    if line.startswith("/"):
+                        await self.handle_command(line)
+                        continue
+                    if line.strip().lower() in {"/quit", "/exit"}:
+                        self._stop = True
+                        break
+                    self.interaction_queue.put_nowait(
+                        {
+                            "input": line,
+                            "private_notes": "",
+                            "audio_waveform": None,
+                        }
+                    )
+                    self.state["unprocessed_interactions"] += 1
+                    await self.interaction_log_manager.append(f"Input: {line}")
+                    print("Queued input. Waiting for response...")
+                except (EOFError, KeyboardInterrupt):
+                    self._stop = True
+                except Exception as e:
+                    logger.error("Simple renderer error: %s", e)
+                    await asyncio.sleep(0.1)
+        finally:
+            if self._log_pump_task is not None:
+                self._log_pump_task.cancel()
+                await asyncio.gather(self._log_pump_task, return_exceptions=True)
+
+    async def _pump_logs(self):
         while not self._stop:
             try:
-                line = await asyncio.to_thread(input, "Input> ")
-                if not line:
-                    continue
-                if line.startswith("/"):
-                    await self.handle_command(line)
-                    continue
-                if line.strip().lower() in {"/quit", "/exit"}:
-                    self._stop = True
-                    break
-                self.interaction_queue.put_nowait(
-                    {
-                        "input": line,
-                        "private_notes": "",
-                        "audio_waveform": None,
-                    }
+                entries, next_offset = await self.interaction_log_manager.get_entries_since(
+                    self._last_log_offset
                 )
-                self.state["unprocessed_interactions"] += 1
-                await self.interaction_log_manager.append(f"Input: {line}")
-            except (EOFError, KeyboardInterrupt):
-                self._stop = True
+                self._last_log_offset = next_offset
+                for entry in entries:
+                    print(f"[log] {entry}")
             except Exception as e:
-                logger.error("Simple renderer error: %s", e)
-                await asyncio.sleep(0.1)
+                logger.error("Simple renderer log pump error: %s", e)
+            await asyncio.sleep(0.2)
 
     async def handle_command(self, command: str):
         cmd = command.strip().lower()
@@ -61,6 +84,7 @@ class SimpleRenderer:
             return
         if cmd == "/help":
             print("Commands: /help, /smoke, /smoke-model, /smoke-all, /quit")
+            print("Voice capture is available in curses mode via Ctrl+V.")
             return
         if cmd in {"/smoke", "/smoke-all"}:
             deterministic_result = await run_deterministic_smoke()

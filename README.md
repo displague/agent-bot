@@ -84,11 +84,13 @@ Quick first-run validation:
    - `/smoke`
    - `/smoke-model`
    - or `/smoke-all`
+   - `/quit` to exit cleanly
 3. Verify evidence in:
    - `logs/smoke_test.jsonl`
 
 Use Ctrl+V in TUI for voice input via PersonaPlex.
 If curses is unavailable (for example on native Windows Python), the app falls back to a simple stdin mode automatically.
+In TUI mode, press `Tab` after a `/` command prefix for autocomplete.
 
 PersonaPlex CLI check:
 ```bash

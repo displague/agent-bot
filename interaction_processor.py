@@ -43,6 +43,7 @@ class InteractionProcessor:
                     interaction = self.interaction_queue.get_nowait()
                     user_input = interaction.get("input", "")
                     audio_waveform = interaction.get("audio_waveform", None)
+                    self.state["is_processing"] = True
 
                     self.logger.info(f"Processing interaction: {user_input}")
 
@@ -72,5 +73,7 @@ class InteractionProcessor:
                     await asyncio.sleep(0.05)
                 except Exception as e:
                     self.logger.error(f"Error processing interaction: {e}")
+                finally:
+                    self.state["is_processing"] = False
             else:
                 await asyncio.sleep(0.1)

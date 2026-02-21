@@ -67,6 +67,7 @@ async def main(stdscr=None, renderer_name="auto", renderer_reason="", dev_mode=F
         "ongoing_thoughts": 0,
         "next_event": "Not scheduled",
         "is_sleeping": False,
+        "is_processing": False,
     }
     interaction_queue = asyncio.Queue()
 
@@ -118,27 +119,26 @@ async def main(stdscr=None, renderer_name="auto", renderer_reason="", dev_mode=F
     )
     event_compressor = EventCompressor(llama_manager, event_scheduler)
 
-    # Start tasks
-    tasks = [
-        asyncio.create_task(ui_renderer.start()),
+    ui_task = asyncio.create_task(ui_renderer.start())
+    background_tasks = [
         asyncio.create_task(event_scheduler.start()),
         asyncio.create_task(interaction_processor.start()),
     ]
     if not dev_mode:
-        tasks.append(asyncio.create_task(thought_generator.start()))
-        tasks.append(asyncio.create_task(event_compressor.start()))
+        background_tasks.append(asyncio.create_task(thought_generator.start()))
+        background_tasks.append(asyncio.create_task(event_compressor.start()))
+    tasks = [ui_task, *background_tasks]
 
     try:
-        await asyncio.gather(*tasks)
+        await ui_task
     except Exception as e:
         logger.exception(f"An error occurred: {e}")
     finally:
+        for task in background_tasks:
+            task.cancel()
+        await asyncio.gather(*background_tasks, return_exceptions=True)
         restore_stderr(backup, f)  # Pass backup and f to restore_stderr
         logger.info("Application stopped")
-        # Perform cleanup, cancel tasks, etc.
-        for task in tasks:
-            task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
 
 
 if __name__ == "__main__":

@@ -25,6 +25,8 @@ logger = logging.getLogger("autonomous_system.tui_renderer")
 
 
 class TUIRenderer:
+    COMMANDS = ["/help", "/smoke", "/smoke-model", "/smoke-all"]
+
     def __init__(
         self,
         stdscr,
@@ -54,6 +56,9 @@ class TUIRenderer:
         self.logger.debug("Starting TUI rendering...")
         curses.curs_set(1)
         self.stdscr.nodelay(True)
+        await self.interaction_log_manager.append(
+            "Type /help for commands. Ctrl+V records voice. Esc toggles debug."
+        )
         while True:
             await self.render()
             await asyncio.sleep(0.1)
@@ -63,8 +68,9 @@ class TUIRenderer:
         max_y, max_x = self.stdscr.getmaxyx()
         sleep_status = "SLEEPING" if self.state["is_sleeping"] else "ACTIVE"
         listening_status = " LISTENING" if self.state.get("is_listening", False) else ""
+        processing_status = " PROCESSING" if self.state.get("is_processing", False) else ""
         status_bar = (
-            f" Status: {sleep_status}{listening_status} | Unprocessed: {self.state['unprocessed_interactions']} "
+            f" Status: {sleep_status}{listening_status}{processing_status} | Unprocessed: {self.state['unprocessed_interactions']} "
             f"| Thoughts: {self.state['ongoing_thoughts']} | Next event: {self.state['next_event']} "
             f"| Voice: {self.state.get('voice_prompt', PERSONAPLEX_VOICE_PROMPT)} "
         )
@@ -181,11 +187,23 @@ class TUIRenderer:
             self.scroll_offset = min(self.scroll_offset + 1, max_log_length)
         elif key == curses.KEY_DOWN:
             self.scroll_offset = max(self.scroll_offset - 1, 0)
+        elif key == 9 and self.input_buffer.startswith("/"):  # Tab for command autocomplete
+            self.autocomplete_command()
         elif 32 <= key <= 126:  # Printable characters
             self.input_buffer += chr(key)
 
         self.render_input_line()
         self.stdscr.refresh()
+
+    def autocomplete_command(self):
+        prefix = self.input_buffer.strip().lower()
+        matches = [cmd for cmd in self.COMMANDS if cmd.startswith(prefix)]
+        if len(matches) == 1:
+            self.input_buffer = matches[0]
+        elif len(matches) > 1:
+            self.show_footer_message("Matches: " + ", ".join(matches))
+        else:
+            self.show_footer_message("No command matches. Try /help")
 
     async def handle_command(self, command: str):
         cmd = command.strip().lower()

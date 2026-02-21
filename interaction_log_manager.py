@@ -28,3 +28,10 @@ class InteractionLogManager:
             display_log = self.interaction_log[start_index:end_index]
             self.logger.debug(f"Getting log from {start_index} to {end_index}")
             return display_log
+
+    async def get_entries_since(self, offset):
+        """Returns new log entries and the latest offset."""
+        async with self.lock:
+            safe_offset = max(0, min(offset, len(self.interaction_log)))
+            entries = self.interaction_log[safe_offset:]
+            return entries, len(self.interaction_log)
