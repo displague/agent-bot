@@ -2,6 +2,7 @@
 
 import asyncio
 import contextlib
+import json
 import os
 import sys
 from concurrent.futures import ThreadPoolExecutor
@@ -14,6 +15,11 @@ from llama_cpp import Llama
 logger = logging.getLogger("autonomous_system.llama_model_manager")
 
 executor = ThreadPoolExecutor(max_workers=MAX_WORKERS)
+
+
+def _log_prompts_enabled() -> bool:
+    value = os.getenv("AGENTBOT_LOG_PROMPTS", "0").strip().lower()
+    return value in {"1", "true", "yes", "on"}
 
 
 class LlamaModelManager:
@@ -53,7 +59,14 @@ class LlamaModelManager:
     def llm_call(self, prompt, max_tokens=512):
         """Calls the Llama model with the given prompt."""
         with self.llm_lock, self.capture_llm_stderr():
-            self.logger.debug(f"LLM call with prompt: {prompt}")
+            if _log_prompts_enabled():
+                self.logger.debug("LLM call prompt: %s", prompt)
+            else:
+                self.logger.debug(
+                    "LLM call invoked (prompt_chars=%s, max_tokens=%s)",
+                    len(prompt),
+                    max_tokens,
+                )
             response = self.llm(prompt, max_tokens=max_tokens, stop=["\n\n"])
             return response["choices"][0]["text"]
 
@@ -86,7 +99,9 @@ Notes:"""
             private_notes = await loop.run_in_executor(
                 executor, self.llm_call, analysis_prompt, 150
             )
-            self.logger.debug(f"Generated private notes: {private_notes}")
+            self.logger.debug(
+                "Generated private notes (chars=%s)", len(private_notes or "")
+            )
             return private_notes.strip()
         except Exception as e:
             self.logger.error(f"Error generating private notes: {e}")
@@ -135,7 +150,12 @@ Now produce the {phase_name} result. If you need to call a function, output JSON
 {{"name": "function_name", "arguments": {{...}}}}
 Otherwise, produce the {phase_name} text directly.
 """
-        self.logger.debug(f"Running phase: {phase_name} with prompt: {prompt}")
+        self.logger.debug(
+            "Running phase=%s (prompt_chars=%s, context_items=%s)",
+            phase_name,
+            len(prompt or ""),
+            len(self.llm_context),
+        )
         response = await loop.run_in_executor(
             executor, self.llm_call, internal_prompt, 512
         )

@@ -1,6 +1,8 @@
 # config.py
 
-HARD_LOG_PATH = "logs/hard_log.jsonl"
+APP_LOG_PATH = "logs/app.log"
+INTERACTION_LOG_PATH = "logs/hard_log.jsonl"
+HARD_LOG_PATH = INTERACTION_LOG_PATH  # Backward-compat alias
 SMOKE_LOG_PATH = "logs/smoke_test.jsonl"
 COMPRESSED_LOG_PATH = "compressed_logs/compressed_log.jsonl"
 INDEX_PATH = "index/context_index.json"
@@ -30,3 +32,4 @@ VOICE_CAPTURE_KEY_LABEL = "Ctrl+R"
 
 # Development/runtime controls
 DEV_DISABLE_AUTONOMOUS = False
+INTERACTION_LOG_WARN_BYTES = 50 * 1024 * 1024

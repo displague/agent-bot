@@ -1,17 +1,20 @@
 import asyncio
 import os
 import sys
-from concurrent.futures import ThreadPoolExecutor
 
 # Import modules
 from logging_setup import setup_logging
-from config import DEV_DISABLE_AUTONOMOUS, MAX_WORKERS, MODEL_PATH
+from config import (
+    DEV_DISABLE_AUTONOMOUS,
+    INTERACTION_LOG_PATH,
+    INTERACTION_LOG_WARN_BYTES,
+    MODEL_PATH,
+)
 from index_manager import IndexManager
 from interaction_log_manager import InteractionLogManager
 from llama_model_manager import LlamaModelManager
 from event_scheduler import EventScheduler
 from simple_renderer import SimpleRenderer
-from functional_agent import FunctionalAgent
 from interaction_processor import InteractionProcessor
 from thought_generator import ThoughtGenerator
 from event_compressor import EventCompressor
@@ -54,6 +57,21 @@ def _show_startup_status(stdscr, lines):
     stdscr.refresh()
 
 
+def _interaction_log_health_message():
+    try:
+        if os.path.exists(INTERACTION_LOG_PATH):
+            size = os.path.getsize(INTERACTION_LOG_PATH)
+            if size >= INTERACTION_LOG_WARN_BYTES:
+                size_mb = size / (1024 * 1024)
+                return (
+                    f"Warning: interaction log is large ({size_mb:.1f} MB): "
+                    f"{INTERACTION_LOG_PATH}"
+                )
+    except Exception:
+        return None
+    return None
+
+
 async def main(stdscr=None, renderer_name="auto", renderer_reason="", dev_mode=False):
     # Initialize logging
     redirect_stderr, restore_stderr, logger = setup_logging()
@@ -61,7 +79,6 @@ async def main(stdscr=None, renderer_name="auto", renderer_reason="", dev_mode=F
     logger.info("Starting application")
 
     # Initialize other components
-    executor = ThreadPoolExecutor(max_workers=MAX_WORKERS)
     state = {
         "unprocessed_interactions": 0,
         "ongoing_thoughts": 0,
@@ -78,6 +95,9 @@ async def main(stdscr=None, renderer_name="auto", renderer_reason="", dev_mode=F
     ]
     if dev_mode:
         startup_lines.append("Development mode: autonomous background tasks disabled.")
+    log_warning = _interaction_log_health_message()
+    if log_warning:
+        startup_lines.append(log_warning)
     _show_startup_status(stdscr, startup_lines)
 
     llama_manager = LlamaModelManager(model_path=MODEL_PATH)
@@ -133,6 +153,18 @@ async def main(stdscr=None, renderer_name="auto", renderer_reason="", dev_mode=F
         await ui_task
     except Exception as e:
         logger.exception(f"An error occurred: {e}")
+        _show_startup_status(
+            stdscr,
+            [
+                "Fatal runtime error in UI loop.",
+                str(e),
+                "Check logs/app.log and logs/llm_stderr.log for details.",
+            ],
+        )
+        print(
+            f"Fatal runtime error: {e}. Check logs/app.log and logs/llm_stderr.log.",
+            flush=True,
+        )
     finally:
         for task in background_tasks:
             task.cancel()

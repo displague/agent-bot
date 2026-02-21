@@ -7,7 +7,7 @@ from datetime import datetime
 import logging
 from concurrent.futures import ThreadPoolExecutor
 
-from config import COMPRESSED_LOG_PATH, HARD_LOG_PATH, MAX_WORKERS
+from config import COMPRESSED_LOG_PATH, INTERACTION_LOG_PATH, MAX_WORKERS
 
 logger = logging.getLogger("autonomous_system.event_compressor")
 executor = ThreadPoolExecutor(max_workers=MAX_WORKERS)
@@ -33,12 +33,25 @@ class EventCompressor:
     async def compress_events(self):
         """Compresses events."""
         self.logger.debug("Starting event compression")
-        if not os.path.exists(HARD_LOG_PATH):
+        if not os.path.exists(INTERACTION_LOG_PATH):
             self.logger.debug("No logs to compress.")
             return
         try:
-            with open(HARD_LOG_PATH, "r") as log_file:
-                logs = [json.loads(line) for line in log_file if line.strip()]
+            logs = []
+            skipped_lines = 0
+            with open(INTERACTION_LOG_PATH, "r", encoding="utf-8") as log_file:
+                for line in log_file:
+                    if not line.strip():
+                        continue
+                    try:
+                        logs.append(json.loads(line))
+                    except json.JSONDecodeError:
+                        skipped_lines += 1
+            if skipped_lines:
+                self.logger.warning(
+                    "Skipped %s malformed interaction log lines during compression",
+                    skipped_lines,
+                )
             if not logs:
                 self.logger.debug("No events to compress.")
                 return

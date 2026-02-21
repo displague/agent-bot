@@ -62,7 +62,12 @@ class TUIRenderer:
             f"Type /help for commands. {VOICE_CAPTURE_KEY_LABEL} records voice. Esc toggles debug."
         )
         while True:
-            await self.render()
+            try:
+                await self.render()
+            except Exception as e:
+                self.logger.exception("TUI render loop error: %s", e)
+                self.show_footer_message(f"TUI error: {str(e)[:120]}")
+                await self.interaction_log_manager.append(f"TUI error: {e}")
             await asyncio.sleep(0.1)
 
     def render_status_bar(self):

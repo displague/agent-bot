@@ -7,7 +7,7 @@ from datetime import datetime
 import logging
 
 from functional_agent import FunctionalAgent
-from config import HARD_LOG_PATH
+from config import INTERACTION_LOG_PATH
 from utils import extract_text_features, extract_audio_features
 
 logger = logging.getLogger("autonomous_system.interaction_processor")
@@ -61,7 +61,7 @@ class InteractionProcessor:
                         "input": user_input,
                         "output": response,
                     }
-                    with open(HARD_LOG_PATH, "a") as log_file:
+                    with open(INTERACTION_LOG_PATH, "a", encoding="utf-8") as log_file:
                         log_file.write(json.dumps(log_entry) + "\n")
 
                     self.index_manager.index_interaction(log_entry)

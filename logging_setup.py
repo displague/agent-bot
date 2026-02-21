@@ -3,7 +3,14 @@
 import logging
 import os
 import sys
-from config import HARD_LOG_PATH
+from logging.handlers import RotatingFileHandler
+
+from config import APP_LOG_PATH
+
+
+def _resolve_log_level():
+    raw = os.getenv("AGENTBOT_LOG_LEVEL", "INFO").strip().upper()
+    return getattr(logging, raw, logging.INFO)
 
 
 def setup_logging():
@@ -14,10 +21,15 @@ def setup_logging():
     os.makedirs("index", exist_ok=True)
 
     logging.basicConfig(
-        level=logging.DEBUG,
+        level=_resolve_log_level(),
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
         handlers=[
-            logging.FileHandler(HARD_LOG_PATH),
+            RotatingFileHandler(
+                APP_LOG_PATH,
+                maxBytes=10 * 1024 * 1024,
+                backupCount=5,
+                encoding="utf-8",
+            ),
             # logging.StreamHandler(sys.stdout),  # Uncomment if you want logs to also go to console
         ],
     )

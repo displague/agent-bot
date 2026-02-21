@@ -103,6 +103,13 @@ personaplex/.venv/Scripts/python.exe -m moshi.offline --help
 - Voice/Persona: Configure in `utils.py` or TUI for PersonaPlex prompts.
 - `AGENTBOT_UI_MODE`: `auto` (default), `simple`, or `curses`.
 - `AGENTBOT_DEV_MODE`: `1` disables autonomous background thought/compression tasks for rapid debugging.
+- `AGENTBOT_LOG_LEVEL`: default `INFO`; set to `DEBUG` for verbose diagnostics.
+- `AGENTBOT_LOG_PROMPTS`: set to `1` only when you need full prompt dumps for debugging.
+
+Log files:
+- `logs/app.log`: rotating diagnostics log.
+- `logs/hard_log.jsonl`: structured interaction records only.
+- `logs/smoke_test.jsonl`: smoke test evidence.
 
 ## Development
 
