@@ -4,11 +4,13 @@ import os
 import time
 from datetime import datetime
 from typing import Any, Dict
+from concurrent.futures import ThreadPoolExecutor
 
 from config import SMOKE_LOG_PATH, SMOKE_MODEL_TIMEOUT_SECONDS
 
 SMOKE_REQUEST = "Hello, repeat after me, testing, testing, 1, 2, 3."
 SMOKE_EXPECTED_RESPONSE = "Testing, testing, 1, 2, 3."
+_SMOKE_EXECUTOR = ThreadPoolExecutor(max_workers=1)
 
 
 def _now_iso() -> str:
@@ -64,10 +66,22 @@ async def run_model_smoke(functional_agent) -> Dict[str, Any]:
     response = ""
     error = None
     try:
-        response = await asyncio.wait_for(
-            functional_agent.handle_request(SMOKE_REQUEST),
-            timeout=SMOKE_MODEL_TIMEOUT_SECONDS,
-        )
+        llama_manager = getattr(functional_agent, "llama_manager", None)
+        if llama_manager is not None and hasattr(llama_manager, "llm_call"):
+            loop = asyncio.get_running_loop()
+            smoke_prompt = (
+                "Repeat exactly this text and nothing else:\n"
+                "Testing, testing, 1, 2, 3."
+            )
+            response = await asyncio.wait_for(
+                loop.run_in_executor(_SMOKE_EXECUTOR, llama_manager.llm_call, smoke_prompt, 48),
+                timeout=SMOKE_MODEL_TIMEOUT_SECONDS,
+            )
+        else:
+            response = await asyncio.wait_for(
+                functional_agent.handle_request(SMOKE_REQUEST),
+                timeout=SMOKE_MODEL_TIMEOUT_SECONDS,
+            )
     except asyncio.TimeoutError:
         error = f"timeout after {SMOKE_MODEL_TIMEOUT_SECONDS}s"
     except Exception as exc:  # pragma: no cover - depends on local model runtime
