@@ -91,8 +91,10 @@ Quick first-run validation:
 
 Use `Ctrl+R` (or `/voice-start`) in TUI to start PersonaPlex server mode for full-duplex voice.
 Use `/voice-stop` to stop server mode and `/voice-status` to check status.
+Voice server auto-starts on launch by default; disable in `config.py` via `VOICE_AUTO_START_ON_LAUNCH = False`.
 If curses is unavailable (for example on native Windows Python), the app falls back to a simple stdin mode automatically.
 In TUI mode, press `Tab` after a `/` command prefix for autocomplete.
+In TUI mode: `Esc` toggles debug view, `Up/Down` scroll log history, and `Backspace` edits input.
 
 PersonaPlex CLI check:
 ```bash

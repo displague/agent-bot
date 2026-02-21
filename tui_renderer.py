@@ -10,6 +10,7 @@ from config import (
     PERSONAPLEX_SERVER_URL,
     PERSONAPLEX_TEXT_PROMPT,
     PERSONAPLEX_VOICE_PROMPT,
+    VOICE_AUTO_START_ON_LAUNCH,
     VOICE_CAPTURE_KEY_CODE,
     VOICE_CAPTURE_KEY_LABEL,
 )
@@ -59,10 +60,15 @@ class TUIRenderer:
         self._stop = False
         self._refresh_interval_seconds = 0.2
         self._voice_server_handle = None
+        self._pending_voice_event = None
         self.state.setdefault("is_listening", False)
         self.state.setdefault("voice_prompt", PERSONAPLEX_VOICE_PROMPT)
         self.state.setdefault("persona_prompt", PERSONAPLEX_TEXT_PROMPT)
         self.state.setdefault("voice_mode", "offline-disabled")
+        self.state.setdefault("voice_server_state", "stopped")
+        self.state.setdefault("voice_session_state", "disconnected")
+        self.state.setdefault("voice_activity_state", "idle")
+        self.state.setdefault("voice_last_event", "none")
 
     async def start(self):
         """Starts the TUI rendering."""
@@ -72,9 +78,23 @@ class TUIRenderer:
         await self.interaction_log_manager.append(
             f"Type /help for commands. {VOICE_CAPTURE_KEY_LABEL} starts voice server mode. Esc toggles debug."
         )
+        if VOICE_AUTO_START_ON_LAUNCH:
+            await self._set_voice_state(
+                server="starting",
+                session="disconnected",
+                activity="starting",
+                event="Auto-starting voice server at launch",
+            )
+            await self.handle_command("/voice-start")
         try:
             while not self._stop:
                 try:
+                    self._refresh_voice_health()
+                    if self._pending_voice_event:
+                        event = self._pending_voice_event
+                        self._pending_voice_event = None
+                        await self.interaction_log_manager.append(f"Voice: {event}")
+                        self.show_footer_message(f"Voice: {event}")
                     await self.render()
                 except Exception as e:
                     self.logger.exception("TUI render loop error: %s", e)
@@ -84,6 +104,30 @@ class TUIRenderer:
         finally:
             stop_personaplex_server(self._voice_server_handle)
             self._voice_server_handle = None
+
+    async def _set_voice_state(self, *, server=None, session=None, activity=None, event=None):
+        if server is not None:
+            self.state["voice_server_state"] = server
+        if session is not None:
+            self.state["voice_session_state"] = session
+        if activity is not None:
+            self.state["voice_activity_state"] = activity
+        if event:
+            self.state["voice_last_event"] = event
+            await self.interaction_log_manager.append(f"Voice: {event}")
+            self.show_footer_message(f"Voice: {event}")
+
+    def _refresh_voice_health(self):
+        if self._voice_server_handle is None:
+            return
+        if self._voice_server_handle.process.poll() is not None:
+            self._voice_server_handle = None
+            self.state["voice_mode"] = "offline-disabled"
+            self.state["voice_server_state"] = "stopped"
+            self.state["voice_session_state"] = "disconnected"
+            self.state["voice_activity_state"] = "failed"
+            self.state["voice_last_event"] = "server exited unexpectedly"
+            self._pending_voice_event = "server exited unexpectedly"
 
     def _safe_addstr(self, y, x, text, attr=0):
         max_y, max_x = self.stdscr.getmaxyx()
@@ -105,10 +149,15 @@ class TUIRenderer:
         listening_status = " LISTENING" if self.state.get("is_listening", False) else ""
         processing_status = " PROCESSING" if self.state.get("is_processing", False) else ""
         voice_mode = self.state.get("voice_mode", "unknown")
+        voice_server_state = self.state.get("voice_server_state", "unknown")
+        voice_session_state = self.state.get("voice_session_state", "unknown")
+        voice_activity_state = self.state.get("voice_activity_state", "unknown")
+        voice_last_event = self.state.get("voice_last_event", "none")
         status_bar = (
             f" Status: {sleep_status}{listening_status}{processing_status} | Unprocessed: {self.state['unprocessed_interactions']} "
             f"| Thoughts: {self.state['ongoing_thoughts']} | Next event: {self.state['next_event']} "
-            f"| Voice: {voice_mode} "
+            f"| Voice: {voice_mode}/{voice_server_state}/{voice_session_state}/{voice_activity_state} "
+            f"| VLast: {voice_last_event} "
         )
         self._safe_addstr(0, 0, status_bar[:max_x], curses.A_REVERSE)
         try:
@@ -208,7 +257,7 @@ class TUIRenderer:
             return
         if key == 27:  # Esc key
             self.active_screen = 2 if self.active_screen == 1 else 1
-        elif key == curses.KEY_BACKSPACE or key == 127:  # Backspace or delete
+        elif key in (curses.KEY_BACKSPACE, 127, 8):  # Backspace variants
             self.input_buffer = self.input_buffer[:-1]
         elif key == VOICE_CAPTURE_KEY_CODE:
             await self.handle_command("/voice-start")
@@ -269,6 +318,11 @@ class TUIRenderer:
             self.show_footer_message("Shutting down...")
             stop_personaplex_server(self._voice_server_handle)
             self._voice_server_handle = None
+            self.state["voice_mode"] = "offline-disabled"
+            self.state["voice_server_state"] = "stopped"
+            self.state["voice_session_state"] = "disconnected"
+            self.state["voice_activity_state"] = "idle"
+            self.state["voice_last_event"] = "stopped"
             self._stop = True
             return
         if cmd == "/help":
@@ -276,7 +330,8 @@ class TUIRenderer:
                 (
                     "Commands: /help, /smoke, /smoke-model, /smoke-all, "
                     "/voice-start, /voice-stop, /voice-status, /quit. "
-                    f"Voice start hotkey: {VOICE_CAPTURE_KEY_LABEL}"
+                    f"Voice start hotkey: {VOICE_CAPTURE_KEY_LABEL}. "
+                    "Keys: Esc=toggle debug, Up/Down=scroll, Tab=autocomplete, Backspace=edit."
                 )
             )
             self.show_footer_message("Command help added to log.")
@@ -290,6 +345,10 @@ class TUIRenderer:
                 f"Voice server: {'running' if active else 'stopped'} "
                 f"({PERSONAPLEX_SERVER_URL})"
             )
+            self.state["voice_server_state"] = "running" if active else "stopped"
+            self.state["voice_session_state"] = "unknown" if active else "disconnected"
+            self.state["voice_activity_state"] = "waiting-client" if active else "idle"
+            self.state["voice_last_event"] = msg
             await self.interaction_log_manager.append(msg)
             self.show_footer_message(msg)
             return
@@ -300,29 +359,51 @@ class TUIRenderer:
             )
             if active:
                 msg = f"Voice server already running at {PERSONAPLEX_SERVER_URL}"
-                await self.interaction_log_manager.append(msg)
-                self.show_footer_message(msg)
+                await self._set_voice_state(
+                    server="running",
+                    session="unknown",
+                    activity="waiting-client",
+                    event=msg,
+                )
+                self.state["voice_mode"] = "server"
                 return
             try:
+                await self._set_voice_state(
+                    server="starting",
+                    session="disconnected",
+                    activity="starting",
+                    event="Starting PersonaPlex voice server",
+                )
                 self._voice_server_handle = await asyncio.to_thread(start_personaplex_server)
                 self.state["voice_mode"] = "server"
-                msg = (
-                    "Voice server started. Open PersonaPlex UI at "
-                    f"{PERSONAPLEX_SERVER_URL}"
+                await self._set_voice_state(
+                    server="running",
+                    session="unknown",
+                    activity="waiting-client",
+                    event=(
+                        "Server running. Open PersonaPlex UI to begin stream: "
+                        f"{PERSONAPLEX_SERVER_URL}"
+                    ),
                 )
-                await self.interaction_log_manager.append(msg)
-                self.show_footer_message(msg)
             except Exception as e:
                 self.logger.error("Voice server start failed: %s", e)
-                self.show_footer_message(f"Voice server error: {str(e)[:100]}")
+                await self._set_voice_state(
+                    server="error",
+                    session="disconnected",
+                    activity="failed",
+                    event=f"Server start failed: {str(e)[:80]}",
+                )
             return
         if cmd == "/voice-stop":
             stop_personaplex_server(self._voice_server_handle)
             self._voice_server_handle = None
             self.state["voice_mode"] = "offline-disabled"
-            msg = "Voice server stopped."
-            await self.interaction_log_manager.append(msg)
-            self.show_footer_message(msg)
+            await self._set_voice_state(
+                server="stopped",
+                session="disconnected",
+                activity="idle",
+                event="Voice server stopped",
+            )
             return
         if cmd in {"/smoke", "/smoke-all"}:
             self.show_footer_message("Running deterministic smoke test...")
