@@ -4,6 +4,9 @@ import signal
 import sys
 from pathlib import Path
 
+# Disable torch compile early to avoid Dynamo/meta-tensor errors in PersonaPlex
+os.environ["NO_TORCH_COMPILE"] = "1"
+
 # Ensure PersonaPlex/Moshi is in path
 project_root = Path(__file__).parent.absolute()
 personaplex_moshi = project_root / "personaplex" / "moshi"
