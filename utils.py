@@ -246,20 +246,34 @@ class PersonaPlexManager:
 
     def _apply_optimizations(self):
         """Apply torch.compile and CUDA graph optimizations based on config."""
-        # Patch LMModel to enable depformer streaming propagation
-        # This is a critical fix for the IndexError: index 16 is out of range
+        # Fix Moshi's broken streaming propagation logic
         try:
-            import moshi.models.lm
-            # We want to catch the moment depformer is initialized and ensure propagate is True
-            orig_lm_init = moshi.models.lm.LMModel.__init__
-            def patched_lm_init(self, *args, **kwargs):
-                orig_lm_init(self, *args, **kwargs)
-                if hasattr(self, "depformer"):
-                    self.depformer.set_streaming_propagate(True)
-                    logger.info("PersonaPlexManager: forced depformer streaming propagation to True.")
-            moshi.models.lm.LMModel.__init__ = patched_lm_init
+            import moshi.modules.streaming
+            def patched_apply_named_streaming(self, fn):
+                def _handle_module(prefix: str, module: torch.nn.Module, recurse: bool = True, is_root: bool = False):
+                    propagate = True
+                    if isinstance(module, moshi.modules.streaming.StreamingModule):
+                        # The BUG: Moshi skips the module if _streaming_propagate is False,
+                        # even if it's the root we just called .streaming() on!
+                        if module._streaming_propagate or is_root:
+                            fn(prefix, module)
+                        else:
+                            propagate = False
+                    if not recurse:
+                        return
+                    if propagate:
+                        for name, child in module.named_children():
+                            _handle_module(prefix + ("." if prefix else "") + name, child)
+
+                # Pass is_root=True for the initial call
+                _handle_module("", self, recurse=False, is_root=True)
+                for name, child in self.named_children():
+                    _handle_module(name, child)
+            
+            moshi.modules.streaming.StreamingModule._apply_named_streaming = patched_apply_named_streaming
+            logger.info("PersonaPlexManager: patched StreamingModule._apply_named_streaming to fix propagation bug.")
         except Exception as e:
-            logger.warning("PersonaPlexManager: failed to patch moshi LMModel: %s", e)
+            logger.warning("PersonaPlexManager: failed to patch moshi StreamingModule: %s", e)
 
         opt = PERSONAPLEX_OPTIMIZE.lower()
         if opt == "eager":
