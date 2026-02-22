@@ -8,7 +8,7 @@ import tempfile
 import time
 import threading
 from pathlib import Path
-from typing import Any, Dict, Optional, Callable
+from typing import Any, Dict, Optional, Callable, Set
 
 import numpy as np
 import soundfile as sf
@@ -208,6 +208,126 @@ class PersonaPlexManager:
                 logger.debug("PersonaPlexManager: saved generated text tokens to %s", output_text_path)
             
             return output_wav_path
+
+
+class AudioMultiplexer:
+    """Captures microphone audio and broadcasts chunks to multiple subscribers."""
+    
+    def __init__(self, sample_rate: int = VOICE_SAMPLE_RATE, chunk_seconds: float = VOICE_CHUNK_SECONDS):
+        self.sample_rate = sample_rate
+        self.chunk_seconds = chunk_seconds
+        self.subscribers: Set[asyncio.Queue] = set()
+        self._stop_event = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+        self._lock = threading.Lock()
+
+    def subscribe(self) -> asyncio.Queue:
+        """Create a new queue and add it to subscribers."""
+        queue = asyncio.Queue()
+        with self._lock:
+            self.subscribers.add(queue)
+        return queue
+
+    def unsubscribe(self, queue: asyncio.Queue):
+        """Remove a queue from subscribers."""
+        with self._lock:
+            if queue in self.subscribers:
+                self.subscribers.remove(queue)
+
+    def start(self):
+        """Start the background capture thread."""
+        if self._thread is not None:
+            return
+        self._stop_event.clear()
+        self._thread = threading.Thread(target=self._run_capture, daemon=True)
+        self._thread.start()
+
+    def stop(self):
+        """Stop the background capture thread."""
+        self._stop_event.set()
+        if self._thread:
+            self._thread.join(timeout=2.0)
+            self._thread = None
+
+    def _run_capture(self):
+        """Dedicated thread for sounddevice capture to ensure steady timing."""
+        logger.info("AudioMultiplexer: starting capture thread.")
+        try:
+            while not self._stop_event.is_set():
+                chunk = capture_microphone_chunk(self.chunk_seconds, self.sample_rate)
+                if chunk is not None and chunk.size > 0:
+                    with self._lock:
+                        # Use a list to iterate to avoid issues if set changes
+                        for q in list(self.subscribers):
+                            try:
+                                # We use call_soon_threadsafe if we were in a loop,
+                                # but since we don't have the loop here easily, 
+                                # we rely on the fact that asyncio.Queue.put_nowait 
+                                # is mostly safe for single-loop applications 
+                                # OR we use a different mechanism.
+                                # Actually, better to use a thread-safe way to get chunks to the queues.
+                                q.put_nowait(chunk)
+                            except asyncio.QueueFull:
+                                try:
+                                    q.get_nowait()
+                                    q.put_nowait(chunk)
+                                except Exception:
+                                    pass
+                            except Exception:
+                                pass
+        except Exception as e:
+            logger.error("AudioMultiplexer: capture thread error: %s", e)
+        finally:
+            logger.info("AudioMultiplexer: capture thread stopped.")
+
+
+class RollingAudioBuffer:
+    """Independent auditory memory that feeds from AudioMultiplexer."""
+    
+    def __init__(self, multiplexer: AudioMultiplexer, seconds: float = 10.0):
+        self.multiplexer = multiplexer
+        self.seconds = seconds
+        max_chunks = int(seconds / multiplexer.chunk_seconds)
+        self.buffer = collections.deque(maxlen=max_chunks)
+        self.queue = multiplexer.subscribe()
+        self._stop_event = asyncio.Event()
+        self._task: Optional[asyncio.Task] = None
+
+    async def start(self):
+        """Start the async task to pull chunks from the multiplexer queue."""
+        if self._task is not None:
+            return
+        self._stop_event.clear()
+        self._task = asyncio.create_task(self._run_loop())
+
+    async def stop(self):
+        """Stop the buffer task and unsubscribe."""
+        self._stop_event.set()
+        if self._task:
+            self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
+            self._task = None
+        self.multiplexer.unsubscribe(self.queue)
+
+    async def _run_loop(self):
+        try:
+            while not self._stop_event.is_set():
+                chunk = await self.queue.get()
+                self.buffer.append(chunk)
+        except asyncio.CancelledError:
+            pass
+
+    def get_recent(self, seconds: float = 5.0) -> np.ndarray:
+        """Retrieve the last 'seconds' of audio from the buffer."""
+        chunks_to_get = int(seconds / self.multiplexer.chunk_seconds)
+        available = list(self.buffer)
+        tail = available[-chunks_to_get:] if chunks_to_get < len(available) else available
+        if not tail:
+            return np.array([], dtype=np.float32)
+        return np.concatenate(tail)
 
 
 class PersonaPlexServerHandle:

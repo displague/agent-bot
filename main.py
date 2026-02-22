@@ -29,7 +29,7 @@ from thought_generator import ThoughtGenerator
 from event_compressor import EventCompressor
 from runtime_manager import RuntimeManager
 from voice_loop import VoiceLoop
-from utils import PersonaPlexManager
+from utils import PersonaPlexManager, AudioMultiplexer, RollingAudioBuffer
 from process_utils import force_exit_now
 
 try:
@@ -166,14 +166,21 @@ async def main(stdscr=None, renderer_name="auto", renderer_reason="", dev_mode=F
 
     index_manager = IndexManager()
     interaction_log_manager = InteractionLogManager()
+    
+    audio_multiplexer = AudioMultiplexer()
+    audio_multiplexer.start()
+    
+    rolling_buffer = RollingAudioBuffer(audio_multiplexer)
+    await rolling_buffer.start()
+
     personaplex_manager = PersonaPlexManager(status_callback=_status_callback)
-    voice_loop = VoiceLoop(state, interaction_log_manager, personaplex_manager=personaplex_manager)
+    voice_loop = VoiceLoop(state, interaction_log_manager, personaplex_manager=personaplex_manager, audio_multiplexer=audio_multiplexer)
 
     llama_manager = LlamaModelManager(
         model_path=MODEL_PATH,
         llm_executor=runtime_manager.llm_executor,
         status_callback=_status_callback,
-        voice_loop=voice_loop,
+        voice_loop=rolling_buffer,
     )
 
     # Explicitly load PersonaPlex models during startup to show progress
@@ -271,6 +278,12 @@ async def main(stdscr=None, renderer_name="auto", renderer_reason="", dev_mode=F
         ui_task.cancel()
         interaction_processor.request_stop()
         thought_generator.request_stop()
+        
+        # Stop auditory backbone
+        if 'rolling_buffer' in locals():
+            await rolling_buffer.stop()
+        if 'audio_multiplexer' in locals():
+            audio_multiplexer.stop()
         
         # Shut down scheduler with a timeout
         try:

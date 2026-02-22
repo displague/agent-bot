@@ -52,20 +52,19 @@ def parse_control_prefix(text: str, prefix: str = VOICE_CONTROL_PREFIX) -> Tuple
 
 
 class VoiceLoop:
-    def __init__(self, state, interaction_log_manager, personaplex_manager=None):
+    def __init__(self, state, interaction_log_manager, personaplex_manager=None, audio_multiplexer=None):
         self.state = state
         self.interaction_log_manager = interaction_log_manager
         self.personaplex_manager = personaplex_manager
+        self.audio_multiplexer = audio_multiplexer
         self._stop_event = asyncio.Event()
         self._listen_task: Optional[asyncio.Task] = None
         self._process_task: Optional[asyncio.Task] = None
         self._utterance_queue: asyncio.Queue = asyncio.Queue()
+        self._audio_queue: Optional[asyncio.Queue] = None
         self._playback_interrupt = threading.Event()
         self._speaking = False
         self._policy = VOICE_INTERJECT_POLICY.lower()
-        # 10s rolling buffer: each chunk is VOICE_CHUNK_SECONDS
-        max_chunks = int(10.0 / VOICE_CHUNK_SECONDS)
-        self._rolling_buffer = collections.deque(maxlen=max_chunks)
 
     def get_recent_audio(self, seconds: float = 5.0) -> np.ndarray:
         """Retrieve the last 'seconds' of audio from the rolling buffer."""
@@ -89,6 +88,11 @@ class VoiceLoop:
                 "voice loop dependencies missing: " + ", ".join(missing)
             )
         self._stop_event.clear()
+        if self.audio_multiplexer:
+            self._audio_queue = self.audio_multiplexer.subscribe()
+        else:
+            raise RuntimeError("AudioMultiplexer required for VoiceLoop.")
+            
         self._listen_task = asyncio.create_task(self._listen_loop())
         self._process_task = asyncio.create_task(self._process_loop())
         self._set_state(mode="offline-continuous", server="running", session="local")
@@ -122,6 +126,9 @@ class VoiceLoop:
                     "Voice loop stop timed out after %.1fs; forcing state transition.",
                     VOICE_STOP_GRACE_SECONDS,
                 )
+        if self.audio_multiplexer and self._audio_queue:
+            self.audio_multiplexer.unsubscribe(self._audio_queue)
+            self._audio_queue = None
         self._listen_task = None
         self._process_task = None
         self._speaking = False
@@ -157,15 +164,12 @@ class VoiceLoop:
         speaking_s = 0.0
         while not self._stop_event.is_set():
             try:
-                chunk = await asyncio.to_thread(
-                    capture_microphone_chunk,
-                    VOICE_CHUNK_SECONDS,
-                    VOICE_SAMPLE_RATE,
-                )
+                if self._audio_queue is None:
+                    break
+                chunk = await self._audio_queue.get()
                 chunk = np.asarray(chunk).reshape(-1)
                 if chunk.size == 0:
                     continue
-                self._rolling_buffer.append(chunk)
                 rms = float(np.sqrt(np.mean(np.square(chunk.astype(np.float32)))))
                 is_speech = rms >= VOICE_VAD_RMS_THRESHOLD
 
