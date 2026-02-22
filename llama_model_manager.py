@@ -171,14 +171,11 @@ class LlamaModelManager:
             raise RuntimeError("transformers model spec must define repo_id.")
         self.logger.info("Loading transformers model from HF cache: repo=%s", repo_id)
         self._status(f"Loading tokenizer: {repo_id}")
-        self.hf_tokenizer = AutoTokenizer.from_pretrained(repo_id)
+        self.hf_tokenizer = AutoTokenizer.from_pretrained(repo_id, trust_remote_code=True)
         config = None
         if AutoConfig is not None:
             self._status(f"Loading model config: {repo_id}")
-            config = AutoConfig.from_pretrained(repo_id)
-            # Avoid repeated tied-weights warning spam during load.
-            if getattr(config, "tie_word_embeddings", None) is not False:
-                config.tie_word_embeddings = False
+            config = AutoConfig.from_pretrained(repo_id, trust_remote_code=True)
         os.makedirs(MODEL_TRANSFORMERS_OFFLOAD_DIR, exist_ok=True)
         self._status(f"Loading transformer weights: {repo_id} (first run may take a while)")
         self.hf_model = AutoModelForCausalLM.from_pretrained(
@@ -189,6 +186,7 @@ class LlamaModelManager:
             offload_folder=MODEL_TRANSFORMERS_OFFLOAD_DIR,
             offload_state_dict=True,
             low_cpu_mem_usage=True,
+            trust_remote_code=True,
         )
         self.llm = None
         self.backend = "transformers"
@@ -265,15 +263,40 @@ class LlamaModelManager:
             if self.backend == "transformers":
                 if self.hf_model is None or self.hf_tokenizer is None:
                     raise RuntimeError("Transformers model is not loaded.")
-                encoded = self.hf_tokenizer(prompt, return_tensors="pt")
+                
+                # Convert context + current prompt into messages
+                messages = []
+                for entry in self.llm_context:
+                    if entry.startswith("Assistant: "):
+                        role = "assistant"
+                        content = entry[len("Assistant: "):]
+                    elif entry.startswith("User: "):
+                        role = "user"
+                        content = entry[len("User: "):]
+                    else:
+                        role = "user"
+                        content = entry
+                    messages.append({"role": role, "content": content})
+                
+                # Add the current user prompt
+                messages.append({"role": "user", "content": prompt})
+                
+                templated_prompt = self.hf_tokenizer.apply_chat_template(
+                    messages, tokenize=False, add_generation_prompt=True
+                )
+                
+                encoded = self.hf_tokenizer(templated_prompt, return_tensors="pt")
                 model_inputs = dict(encoded)
                 target_device = getattr(self.hf_model, "device", None)
                 if target_device is not None:
                     model_inputs = {k: v.to(target_device) for k, v in encoded.items()}
+                
                 output_ids = self.hf_model.generate(
                     **model_inputs,
                     max_new_tokens=min(max_tokens, MODEL_TRANSFORMERS_MAX_NEW_TOKENS),
-                    do_sample=False,
+                    do_sample=True,
+                    temperature=0.4,
+                    repetition_penalty=1.2,
                     pad_token_id=self.hf_tokenizer.eos_token_id,
                 )
                 new_tokens = output_ids[0][model_inputs["input_ids"].shape[-1] :]
@@ -388,11 +411,20 @@ Notes:"""
         """Runs a single phase by calling the LLM and handling function calls."""
         loop = asyncio.get_running_loop()
 
+        # Prepare tool definitions
+        tools_str = ""
+        if self.available_functions:
+            tools_str = "# Available Tools:\n"
+            for fname, func in self.available_functions.items():
+                desc = func.__doc__ or "No description available."
+                tools_str += f"- {fname}: {desc}\n"
+
         # Prepare internal prompt for the phase
         internal_prompt = f"""
 # Phase: {phase_name}
 # Reflection:
 {notes}
+{tools_str}
 # Context:
 {"\n".join(self.llm_context)}
 # Instruction:
@@ -419,6 +451,7 @@ Otherwise, produce the {phase_name} text directly.
                 fname = call_data["name"]
                 args = call_data["arguments"]
                 function_result = self.call_function(fname, args)
+                # Function calls are still part of internal state context for the next phase
                 self.update_context(
                     f"Function Call: {fname}, args: {args}, result: {function_result}"
                 )
@@ -427,5 +460,6 @@ Otherwise, produce the {phase_name} text directly.
                 self.logger.error(f"Failed to parse function call: {e}")
                 return "Error parsing function call."
         else:
-            self.update_context(f"{phase_name} Output: {response}")
+            # We no longer add every phase output to self.llm_context here.
+            # FunctionalAgent will handle the primary dialogue history.
             return response

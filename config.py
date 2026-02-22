@@ -17,7 +17,7 @@ MODEL_DEFAULT_ALIAS = "gemma-it"
 MODEL_LIST = {
     "gemma-it": {
         "backend": "transformers",
-        "repo_id": "google/gemma-3n-E2E-it",
+        "repo_id": "google/gemma-3n-E2B-it",
     },
     # Tiny model for lightweight/CPU-only testing.
     "tiny": {
@@ -37,8 +37,11 @@ MODEL_TRANSFORMERS_OFFLOAD_DIR = "hf_offload"
 # PersonaPlex / Moshi settings
 PERSONAPLEX_VOICE_PROMPT = "NATF2.pt"
 PERSONAPLEX_TEXT_PROMPT = (
-    "You are a wise and friendly teacher. Answer questions or provide advice in a "
-    "clear and engaging way."
+    "You are a wise and friendly teacher with multi-modal capabilities. "
+    "You can hear your environment through a 10-second auditory memory. "
+    "If you are unsure about a sound or want to investigate the recent past, "
+    "you can use the 'inspect_audio_snippet' tool. Answer questions or provide advice "
+    "in a clear and engaging way."
 )
 PERSONAPLEX_VOICE_PROMPT_DIR = ""
 PERSONAPLEX_DEVICE = "cuda"

@@ -4,6 +4,12 @@ import signal
 import sys
 from pathlib import Path
 
+# Ensure PersonaPlex/Moshi is in path
+project_root = Path(__file__).parent.absolute()
+personaplex_moshi = project_root / "personaplex" / "moshi"
+if personaplex_moshi.exists() and str(personaplex_moshi) not in sys.path:
+    sys.path.insert(0, str(personaplex_moshi))
+
 # Import modules
 from logging_setup import setup_logging
 from config import (
@@ -245,6 +251,18 @@ async def main(stdscr=None, renderer_name="auto", renderer_reason="", dev_mode=F
             )
     finally:
         logger.info("Starting shutdown sequence")
+        
+        # Start hard-kill watchdog: if we don't finish in 10s, force exit.
+        def _watchdog():
+            time.sleep(10)
+            print("\nShutdown watchdog triggered: force killing process tree...", flush=True)
+            force_exit_now(130)
+        
+        import threading
+        import time
+        watchdog_thread = threading.Thread(target=_watchdog, daemon=True)
+        watchdog_thread.start()
+
         ui_task.cancel()
         interaction_processor.request_stop()
         thought_generator.request_stop()
