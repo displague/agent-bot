@@ -29,11 +29,12 @@ except Exception:  # pragma: no cover - optional dependency at runtime
     Llama = None
 
 try:
-    from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
+    from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer, AutoProcessor
 except Exception:  # pragma: no cover - optional dependency at runtime
     AutoConfig = None
     AutoModelForCausalLM = None
     AutoTokenizer = None
+    AutoProcessor = None
 
 logger = logging.getLogger("autonomous_system.llama_model_manager")
 
@@ -69,6 +70,7 @@ class LlamaModelManager:
         self.llm = None
         self.hf_model = None
         self.hf_tokenizer = None
+        self.hf_processor = None
         self.voice_loop = voice_loop
         self.original_stderr = sys.stderr
         self.available_functions = {
@@ -172,16 +174,20 @@ class LlamaModelManager:
         self.logger.info("Loading transformers model from HF cache: repo=%s", repo_id)
         self._status(f"Loading tokenizer: {repo_id}")
         self.hf_tokenizer = AutoTokenizer.from_pretrained(repo_id, trust_remote_code=True)
+        if AutoProcessor is not None:
+            self._status(f"Loading processor: {repo_id}")
+            self.hf_processor = AutoProcessor.from_pretrained(repo_id, trust_remote_code=True)
         config = None
         if AutoConfig is not None:
             self._status(f"Loading model config: {repo_id}")
             config = AutoConfig.from_pretrained(repo_id, trust_remote_code=True)
         os.makedirs(MODEL_TRANSFORMERS_OFFLOAD_DIR, exist_ok=True)
         self._status(f"Loading transformer weights: {repo_id} (first run may take a while)")
+        import torch
         self.hf_model = AutoModelForCausalLM.from_pretrained(
             repo_id,
             config=config,
-            torch_dtype="auto",
+            torch_dtype=torch.bfloat16 if PERSONAPLEX_DEVICE == "cuda" else "auto",
             device_map="auto",
             offload_folder=MODEL_TRANSFORMERS_OFFLOAD_DIR,
             offload_state_dict=True,
@@ -239,8 +245,8 @@ class LlamaModelManager:
                 os.close(old_stderr)
                 sys.stderr = self.original_stderr
 
-    def llm_call(self, prompt, max_tokens=512):
-        """Calls the Llama model with the given prompt."""
+    def llm_call(self, prompt, max_tokens=512, audio=None):
+        """Calls the Llama model with the given prompt and optional multi-modal data."""
         with self.llm_lock, self.capture_llm_stderr():
             if _log_prompts_enabled():
                 self.logger.debug("LLM call prompt: %s", prompt)
@@ -265,7 +271,7 @@ class LlamaModelManager:
                     raise RuntimeError("Transformers model is not loaded.")
                 
                 # Convert context + current prompt into messages
-                messages = []
+                raw_messages = []
                 for entry in self.llm_context:
                     if entry.startswith("Assistant: "):
                         role = "assistant"
@@ -276,21 +282,50 @@ class LlamaModelManager:
                     else:
                         role = "user"
                         content = entry
-                    messages.append({"role": role, "content": content})
+                    raw_messages.append({"role": role, "content": content})
                 
                 # Add the current user prompt
-                messages.append({"role": "user", "content": prompt})
+                raw_messages.append({"role": "user", "content": prompt})
                 
+                # Normalize messages: ensure alternating user/assistant and starts with user
+                messages = []
+                for m in raw_messages:
+                    if not messages:
+                        if m["role"] == "user":
+                            messages.append(m)
+                        continue
+                    
+                    if m["role"] == messages[-1]["role"]:
+                        # Merge consecutive same-role messages
+                        messages[-1]["content"] += "\n" + m["content"]
+                    else:
+                        messages.append(m)
+
                 templated_prompt = self.hf_tokenizer.apply_chat_template(
                     messages, tokenize=False, add_generation_prompt=True
                 )
                 
-                encoded = self.hf_tokenizer(templated_prompt, return_tensors="pt")
-                model_inputs = dict(encoded)
+                # Use processor if multi-modal data is present
+                if audio is not None and self.hf_processor is not None:
+                    model_inputs = self.hf_processor(
+                        text=templated_prompt,
+                        audios=audio,
+                        sampling_rate=16000, # Common for Gemma audio, adjust if needed
+                        return_tensors="pt"
+                    )
+                else:
+                    encoded = self.hf_tokenizer(templated_prompt, return_tensors="pt")
+                    model_inputs = dict(encoded)
+                
                 target_device = getattr(self.hf_model, "device", None)
                 if target_device is not None:
                     model_inputs = {k: v.to(target_device) for k, v in encoded.items()}
                 
+                # Ensure floating point model inputs are in bfloat16 if on CUDA
+                if target_device is not None and "cuda" in str(target_device):
+                    model_inputs = {k: v.to(dtype=torch.bfloat16) if torch.is_floating_point(v) else v 
+                                   for k, v in model_inputs.items()}
+
                 output_ids = self.hf_model.generate(
                     **model_inputs,
                     max_new_tokens=min(max_tokens, MODEL_TRANSFORMERS_MAX_NEW_TOKENS),
@@ -394,7 +429,7 @@ Notes:"""
         )
         return f"Scheduled {event_type} event with message: {message}"
 
-    def fn_inspect_audio_snippet(self, seconds: float = 5.0):
+    def fn_inspect_audio_snippet(self, seconds: float = 5.0, return_raw: bool = False):
         """Inspects the last 'seconds' of audio for non-verbal context."""
         if self.voice_loop is None:
             return "Error: Voice loop not connected to model manager."
@@ -403,6 +438,9 @@ Notes:"""
         if audio.size == 0:
             return "No audio captured in the buffer yet."
         
+        if return_raw:
+            return audio
+
         from utils import extract_audio_features
         features = extract_audio_features(audio)
         return f"Audio Snippet ({seconds}s) Features: {features}"
@@ -451,6 +489,15 @@ Otherwise, produce the {phase_name} text directly.
                 fname = call_data["name"]
                 args = call_data["arguments"]
                 function_result = self.call_function(fname, args)
+                
+                # If tool returns raw audio, re-invoke LLM with multi-modal data
+                if isinstance(function_result, np.ndarray):
+                    self.logger.info("Tool returned raw audio, re-invoking LLM with multi-modal context.")
+                    follow_up_prompt = f"I have retrieved the audio you requested. What can you hear in this {len(function_result)/16000:.1f}s snippet?"
+                    return await loop.run_in_executor(
+                        self.llm_executor, self.llm_call, follow_up_prompt, 512, function_result
+                    )
+
                 # Function calls are still part of internal state context for the next phase
                 self.update_context(
                     f"Function Call: {fname}, args: {args}, result: {function_result}"

@@ -67,28 +67,38 @@ class PersonaPlexManager:
             return
         
         if loaders is None:
+            logger.error("moshi package not available for in-process loading.")
             raise RuntimeError("moshi package not available for in-process loading.")
 
+        logger.info("PersonaPlexManager: starting in-process model load...")
         with self._lock:
             from huggingface_hub import hf_hub_download
             
-            # 1) Load Mimi
-            mimi_weight = hf_hub_download(self.repo, loaders.MIMI_NAME)
-            self.mimi = loaders.get_mimi(mimi_weight, self.device)
-            self.other_mimi = loaders.get_mimi(mimi_weight, self.device)
-            
-            # 2) Load tokenizer
-            tokenizer_path = hf_hub_download(self.repo, loaders.TEXT_TOKENIZER_NAME)
-            self.text_tokenizer = sentencepiece.SentencePieceProcessor(tokenizer_path)
-            
-            # 3) Load Moshi LM
-            moshi_weight = hf_hub_download(self.repo, loaders.MOSHI_NAME)
-            self.lm = loaders.get_moshi_lm(moshi_weight, device=self.device, cpu_offload=self.cpu_offload)
-            self.lm.eval()
-            
-            # Streaming forever setup
-            self.mimi.streaming_forever(1)
-            self.other_mimi.streaming_forever(1)
+            try:
+                # 1) Load Mimi
+                logger.info("PersonaPlexManager: loading mimi...")
+                mimi_weight = hf_hub_download(self.repo, loaders.MIMI_NAME)
+                self.mimi = loaders.get_mimi(mimi_weight, self.device)
+                self.other_mimi = loaders.get_mimi(mimi_weight, self.device)
+                
+                # 2) Load tokenizer
+                logger.info("PersonaPlexManager: loading tokenizer...")
+                tokenizer_path = hf_hub_download(self.repo, loaders.TEXT_TOKENIZER_NAME)
+                self.text_tokenizer = sentencepiece.SentencePieceProcessor(tokenizer_path)
+                
+                # 3) Load Moshi LM
+                logger.info("PersonaPlexManager: loading moshi lm...")
+                moshi_weight = hf_hub_download(self.repo, loaders.MOSHI_NAME)
+                self.lm = loaders.get_moshi_lm(moshi_weight, device=self.device, cpu_offload=self.cpu_offload)
+                self.lm.eval()
+                
+                # Streaming forever setup
+                self.mimi.streaming_forever(1)
+                self.other_mimi.streaming_forever(1)
+                logger.info("PersonaPlexManager: models loaded and ready.")
+            except Exception as e:
+                logger.exception("PersonaPlexManager: failed to load models: %s", e)
+                raise
 
     async def infer_async(self, text_prompt: str, voice_prompt_path: str, input_wav_path: str, output_wav_path: str, output_text_path: Optional[str] = None):
         """Run a single inference turn asynchronously."""
@@ -96,9 +106,25 @@ class PersonaPlexManager:
 
     def infer(self, text_prompt: str, voice_prompt_path: str, input_wav_path: str, output_wav_path: str, output_text_path: Optional[str] = None):
         """Synchronous inference implementation using the warm models."""
+        logger.info("PersonaPlexManager: starting inference for prompt: %s", text_prompt[:100])
         self.load()
         from moshi.offline import warmup, wrap_with_system_tags
         
+        # Use provided prompt or default
+        final_text_prompt = text_prompt or PERSONAPLEX_TEXT_PROMPT
+        
+        # Resolve voice prompt path
+        v_path = Path(voice_prompt_path)
+        v_name = v_path.name
+        v_dir = PERSONAPLEX_VOICE_PROMPT_DIR.strip()
+        if not v_dir:
+            v_parent = str(v_path.parent)
+            if v_parent not in {"", "."}:
+                v_dir = v_parent
+        
+        final_voice_prompt = str(Path(v_dir) / v_name) if v_dir else v_name
+        logger.debug("PersonaPlexManager: using voice prompt path: %s", final_voice_prompt)
+
         with self._lock:
             # Re-create LMGen for each turn to reset state correctly for now
             lm_gen = LMGen(
@@ -120,12 +146,12 @@ class PersonaPlexManager:
             warmup(self.mimi, self.other_mimi, lm_gen, self.device, frame_size)
             
             # Load prompts
-            if voice_prompt_path.endswith('.pt'):
-                lm_gen.load_voice_prompt_embeddings(voice_prompt_path)
+            if final_voice_prompt.endswith('.pt'):
+                lm_gen.load_voice_prompt_embeddings(final_voice_prompt)
             else:
-                lm_gen.load_voice_prompt(voice_prompt_path)
+                lm_gen.load_voice_prompt(final_voice_prompt)
             
-            lm_gen.text_prompt_tokens = self.text_tokenizer.encode(wrap_with_system_tags(text_prompt))
+            lm_gen.text_prompt_tokens = self.text_tokenizer.encode(wrap_with_system_tags(final_text_prompt))
             
             self.mimi.reset_streaming()
             self.other_mimi.reset_streaming()
@@ -138,6 +164,7 @@ class PersonaPlexManager:
             if input_data.ndim > 1:
                 input_data = input_data.mean(-1)
             
+            logger.info("PersonaPlexManager: processing input audio (%d samples)...", len(input_data))
             all_out_pcms = []
             all_text_tokens = []
             chunk_size = frame_size
@@ -164,10 +191,12 @@ class PersonaPlexManager:
             if all_out_pcms:
                 res = np.concatenate(all_out_pcms)
                 sf.write(output_wav_path, res, self.mimi.sample_rate)
+                logger.info("PersonaPlexManager: saved generated audio to %s", output_wav_path)
             
             if output_text_path:
                 with open(output_text_path, "w", encoding="utf-8") as f:
                     json.dump(all_text_tokens, f)
+                logger.debug("PersonaPlexManager: saved generated text tokens to %s", output_text_path)
             
             return output_wav_path
 
