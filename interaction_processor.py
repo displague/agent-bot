@@ -182,6 +182,7 @@ class InteractionProcessor:
                         except Exception as e:
                             self.logger.error(f"Failed to speak final response: {e}")
 
+                        await self.interaction_log_manager.append(f"Thought: {response}")
                         self.index_manager.index_interaction({"input": user_input, "output": response})
                         self.state["last_processing_status"] = "ok"
                         self.state["last_processing_error"] = ""

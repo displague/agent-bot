@@ -19,6 +19,10 @@ class FunctionalAgent:
 
     async def handle_request(self, prompt):
         """Handles a request through multiple phases."""
+        if self.llama_manager is None:
+            self.logger.info("Deep reasoning disabled (no LLM). Returning default response.")
+            return "Okay."
+
         self.logger.debug(f"Handling request: {prompt}")
         
         # User input is part of the long-term context

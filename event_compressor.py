@@ -36,6 +36,10 @@ class EventCompressor:
 
     async def compress_events(self):
         """Compresses events."""
+        if self.llama_manager is None:
+            self.logger.debug("Event compression skipped (deep reasoning disabled).")
+            return
+            
         self.logger.debug("Starting event compression")
         if self.state.get("is_processing", False):
             self.logger.debug("Skipping compression while user interaction is processing.")

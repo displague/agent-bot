@@ -154,6 +154,10 @@ class SimpleRenderer:
             print("Usage: /model | /model list | /model use <alias>")
             return
         if cmd == "/llm-status":
+            if model_manager is None:
+                print("LLM status: DISABLED (deep reasoning bypassed).")
+                return
+                
             info = model_manager.get_model_info() if model_manager is not None else {}
             llm_busy = model_manager.is_busy() if model_manager is not None else False
             elapsed = ""
@@ -177,7 +181,7 @@ class SimpleRenderer:
             return
         if cmd == "/llm-diagnose":
             if model_manager is None:
-                print("LLM diagnose: model manager unavailable.")
+                print("LLM diagnose: DISABLED (deep reasoning bypassed).")
                 return
             if model_manager.is_busy():
                 msg = "LLM diagnose: skipped (LLM busy with active request)."

@@ -214,12 +214,16 @@ async def main(stdscr=None, renderer_name="auto", renderer_reason="", dev_mode=F
     personaplex_manager = PersonaPlexManager(status_callback=_status_callback)
     voice_loop = VoiceLoop(state, interaction_log_manager, personaplex_manager=personaplex_manager, audio_multiplexer=audio_multiplexer)
 
-    llama_manager = LlamaModelManager(
-        model_path=MODEL_PATH,
-        llm_executor=runtime_manager.llm_executor,
-        status_callback=_status_callback,
-        voice_loop=rolling_buffer,
-    )
+    llama_manager = None
+    if not skip_reasoning:
+        llama_manager = LlamaModelManager(
+            model_path=MODEL_PATH,
+            llm_executor=runtime_manager.llm_executor,
+            status_callback=_status_callback,
+            voice_loop=rolling_buffer,
+        )
+    else:
+        _show_startup_status(stdscr, startup_lines + ["Stage: Skipping LLM load (deep reasoning disabled)"])
 
     # Explicitly load PersonaPlex models during startup to show progress
     await asyncio.to_thread(personaplex_manager.load)
@@ -347,6 +351,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Agent-Bot")
     parser.add_argument("--reset-logs", action="store_true", help="Clear all logs on startup")
     parser.add_argument("--dev", action="store_true", help="Enable dev mode (disables autonomous tasks)")
+    parser.add_argument("--skip-deep-reasoning", action="store_true", help="Bypass the deep reasoning LLM phase")
     args_parsed = parser.parse_args()
 
     if args_parsed.reset_logs:
@@ -357,6 +362,13 @@ if __name__ == "__main__":
     try:
         ui_mode = _resolve_ui_mode()
         dev_mode = args_parsed.dev or _env_enabled("AGENTBOT_DEV_MODE", default=DEV_DISABLE_AUTONOMOUS)
+        
+        # Merge CLI and config for deep reasoning toggle
+        import config
+        if args_parsed.skip_deep_reasoning:
+            config.SKIP_DEEP_REASONING = True
+        skip_reasoning = getattr(config, "SKIP_DEEP_REASONING", False)
+        
         curses_ok, curses_mod, reason = _check_curses_available()
 
         if ui_mode == "simple":

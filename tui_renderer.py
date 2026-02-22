@@ -494,6 +494,12 @@ class TUIRenderer:
             self.show_footer_message(usage)
             return
         if cmd == "/llm-status":
+            if model_manager is None:
+                msg = "LLM status: DISABLED (deep reasoning bypassed)."
+                await self.interaction_log_manager.append(msg)
+                self.show_footer_message(msg)
+                return
+                
             model_info = model_manager.get_model_info() if model_manager is not None else {}
             llm_busy = model_manager.is_busy() if model_manager is not None else False
             elapsed = ""
@@ -518,7 +524,7 @@ class TUIRenderer:
             return
         if cmd == "/llm-diagnose":
             if model_manager is None:
-                msg = "LLM diagnose: model manager unavailable."
+                msg = "LLM diagnose: DISABLED (deep reasoning bypassed)."
                 await self.interaction_log_manager.append(msg)
                 self.show_footer_message(msg)
                 return
