@@ -220,36 +220,48 @@ async def main(stdscr=None, renderer_name="auto", renderer_reason="", dev_mode=F
         )
 
     try:
-        await ui_task
-    except Exception as e:
-        logger.exception(f"An error occurred: {e}")
-        _show_startup_status(
-            stdscr,
-            [
-                "Fatal runtime error in UI loop.",
-                str(e),
-                "Check logs/app.log and logs/llm_stderr.log for details.",
-            ],
-        )
-        print(
-            f"Fatal runtime error: {e}. Check logs/app.log and logs/llm_stderr.log.",
-            flush=True,
-        )
+        await asyncio.wait_for(ui_task, timeout=None)
+    except (Exception, asyncio.CancelledError) as e:
+        if not isinstance(e, asyncio.CancelledError):
+            logger.exception(f"An error occurred: {e}")
+            _show_startup_status(
+                stdscr,
+                [
+                    "Fatal runtime error in UI loop.",
+                    str(e),
+                    "Check logs/app.log and logs/llm_stderr.log for details.",
+                ],
+            )
+            print(
+                f"Fatal runtime error: {e}. Check logs/app.log and logs/llm_stderr.log.",
+                flush=True,
+            )
     finally:
+        logger.info("Starting shutdown sequence")
         interaction_processor.request_stop()
         thought_generator.request_stop()
-        await event_scheduler.shutdown()
+        
+        # Shut down scheduler with a timeout
+        try:
+            await asyncio.wait_for(event_scheduler.shutdown(), timeout=2.0)
+        except asyncio.TimeoutError:
+            logger.warning("Event scheduler shutdown timed out")
+
+        # Cancel all background tasks
         for task in background_tasks:
             task.cancel()
-        done, pending = await asyncio.wait(
-            background_tasks, timeout=SHUTDOWN_GRACE_SECONDS
-        )
-        for task in pending:
-            task.cancel()
-        await asyncio.gather(*pending, return_exceptions=True)
+        
+        if background_tasks:
+            done, pending = await asyncio.wait(
+                background_tasks, timeout=SHUTDOWN_GRACE_SECONDS
+            )
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*background_tasks, return_exceptions=True)
+
         await runtime_manager.cancel_all_tasks(timeout_seconds=SHUTDOWN_GRACE_SECONDS)
         runtime_manager.shutdown_executors()
-        restore_stderr(backup, f)  # Pass backup and f to restore_stderr
+        restore_stderr(backup, f)
         logger.info("Application stopped")
 
 

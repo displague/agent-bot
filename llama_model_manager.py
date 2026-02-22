@@ -143,7 +143,9 @@ class LlamaModelManager:
         model_path = self._resolve_llama_model_path(spec)
         requested_ctx = int(os.getenv("AGENTBOT_LLAMA_N_CTX", "2048"))
         self._status(f"Loading llama.cpp backend (n_ctx={requested_ctx})")
-        self.llm = Llama(model_path=model_path, n_ctx=requested_ctx)
+        self.llm = Llama(
+            model_path=model_path, n_ctx=requested_ctx, n_gpu_layers=-1, n_threads=os.cpu_count()
+        )
         self.hf_model = None
         self.hf_tokenizer = None
         self.backend = "llama_cpp"

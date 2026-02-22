@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import subprocess
 import tempfile
 import threading
 import sys
@@ -230,6 +231,10 @@ class VoiceLoop:
                         await self._set_activity("listening", "resuming listen mode")
             except asyncio.CancelledError:
                 raise
+            except (asyncio.TimeoutError, subprocess.TimeoutExpired):
+                self._speaking = False
+                logger.error("Voice process timed out.")
+                await self._set_activity("error", "process timeout (model too slow)")
             except Exception as exc:
                 self._speaking = False
                 logger.error("Voice process loop error: %s", exc)

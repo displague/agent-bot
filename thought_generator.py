@@ -54,6 +54,8 @@ class ThoughtGenerator:
             try:
                 response = await self.functional_agent.handle_request(thought_prompt)
                 self.state.setdefault("current_thoughts", []).append(response)
+                while len(self.state["current_thoughts"]) > 5:
+                    self.state["current_thoughts"].pop(0)
                 await self.interaction_log_manager.append(f"Thought: {response}")
                 await asyncio.sleep(random.uniform(1, 3))
             except Exception as e:
@@ -61,12 +63,6 @@ class ThoughtGenerator:
                 await asyncio.sleep(1)
             finally:
                 self.state["ongoing_thoughts"] = max(0, self.state["ongoing_thoughts"] - 1)
-                if (
-                    response is not None
-                    and "current_thoughts" in self.state
-                    and response in self.state["current_thoughts"]
-                ):
-                    self.state["current_thoughts"].remove(response)
 
     def request_stop(self):
         self._stop_event.set()
