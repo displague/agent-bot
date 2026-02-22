@@ -289,8 +289,11 @@ class PersonaPlexManager:
                 start = time.perf_counter()
                 self._status("PersonaPlexManager: loading moshi lm...")
                 moshi_weight = hf_hub_download(self.repo, loaders.MOSHI_NAME)
+                # Ensure device is correctly passed and cpu_offload is handled
                 self.lm = loaders.get_moshi_lm(moshi_weight, device=self.device, cpu_offload=self.cpu_offload)
                 self.lm.eval()
+                if not self.cpu_offload:
+                    self.lm.to(self.device)
                 dur = time.perf_counter() - start
                 vram_now = get_vram()
                 self._status(f"PersonaPlexManager: moshi loaded in {dur:.1f}s (VRAM: {vram_now:.2f}GB, +{vram_now-vram_before:.2f}GB)")
