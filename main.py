@@ -1,5 +1,6 @@
 import asyncio
 import os
+import signal
 import sys
 from pathlib import Path
 
@@ -21,6 +22,7 @@ from interaction_processor import InteractionProcessor
 from thought_generator import ThoughtGenerator
 from event_compressor import EventCompressor
 from runtime_manager import RuntimeManager
+from process_utils import force_exit_now
 
 try:
     from dotenv import load_dotenv
@@ -41,6 +43,38 @@ def _load_environment():
     env_path = Path(".env")
     if env_path.exists():
         load_dotenv(dotenv_path=env_path, override=False)
+
+
+_interrupt_count = 0
+
+
+def _install_sigint_handler():
+    if os.name not in {"nt", "posix"}:
+        return
+
+    def _handle_sigint(_signum, _frame):
+        global _interrupt_count
+        _interrupt_count += 1
+        if _interrupt_count >= 2:
+            print("Force quitting immediately (second Ctrl+C)...", flush=True)
+            force_exit_now(130)
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGINT, _handle_sigint)
+
+
+def _ensure_utf8_mode_on_windows():
+    """Relaunch under UTF-8 mode to avoid cp1252 decode issues on Windows."""
+    if os.name != "nt":
+        return
+    if sys.flags.utf8_mode:
+        return
+    if os.getenv("AGENTBOT_UTF8_REEXEC") == "1":
+        return
+    env = os.environ.copy()
+    env["AGENTBOT_UTF8_REEXEC"] = "1"
+    args = [sys.executable, "-X", "utf8", *sys.argv]
+    os.execvpe(sys.executable, args, env)
 
 
 def _resolve_ui_mode() -> str:
@@ -110,15 +144,22 @@ async def main(stdscr=None, renderer_name="auto", renderer_reason="", dev_mode=F
         f"Renderer: {renderer_name}" + (f" ({renderer_reason})" if renderer_reason else ""),
         "Loading model... please wait.",
     ]
+    startup_stage = {"detail": "Preparing model runtime..."}
     if dev_mode:
         startup_lines.append("Development mode: autonomous background tasks disabled.")
     log_warning = _interaction_log_health_message()
     if log_warning:
         startup_lines.append(log_warning)
-    _show_startup_status(stdscr, startup_lines)
+    _show_startup_status(stdscr, startup_lines + [startup_stage["detail"]])
+
+    def _status_callback(message: str):
+        startup_stage["detail"] = f"Stage: {message}"
+        _show_startup_status(stdscr, startup_lines + [startup_stage["detail"]])
 
     llama_manager = LlamaModelManager(
-        model_path=MODEL_PATH, llm_executor=runtime_manager.llm_executor
+        model_path=MODEL_PATH,
+        llm_executor=runtime_manager.llm_executor,
+        status_callback=_status_callback,
     )
 
     _show_startup_status(
@@ -213,6 +254,8 @@ async def main(stdscr=None, renderer_name="auto", renderer_reason="", dev_mode=F
 
 
 if __name__ == "__main__":
+    _ensure_utf8_mode_on_windows()
+    _install_sigint_handler()
     _load_environment()
     redirect_stderr, restore_stderr, logger = setup_logging()
     backup, f = redirect_stderr()  # Store the file object
@@ -268,7 +311,10 @@ if __name__ == "__main__":
                     )
                 )
     except KeyboardInterrupt:
-        print("Interrupted by Ctrl+C. Shutting down...", flush=True)
+        print(
+            "Interrupted by Ctrl+C. Shutting down... (Press Ctrl+C again to force quit)",
+            flush=True,
+        )
     except Exception as e:
         print(f"An error occurred: {e}")
     finally:

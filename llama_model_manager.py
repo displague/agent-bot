@@ -5,11 +5,35 @@ import contextlib
 import json
 import os
 import sys
+import math
 from threading import Lock
 import logging
+from typing import Any, Callable, Dict, Optional
 
-from config import MODEL_PATH
-from llama_cpp import Llama
+from config import (
+    MODEL_DEFAULT_ALIAS,
+    MODEL_LIST,
+    MODEL_PATH,
+    MODEL_TRANSFORMERS_MAX_NEW_TOKENS,
+    MODEL_TRANSFORMERS_OFFLOAD_DIR,
+)
+
+try:
+    from huggingface_hub import hf_hub_download
+except Exception:  # pragma: no cover - optional dependency at runtime
+    hf_hub_download = None
+
+try:
+    from llama_cpp import Llama
+except Exception:  # pragma: no cover - optional dependency at runtime
+    Llama = None
+
+try:
+    from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
+except Exception:  # pragma: no cover - optional dependency at runtime
+    AutoConfig = None
+    AutoModelForCausalLM = None
+    AutoTokenizer = None
 
 logger = logging.getLogger("autonomous_system.llama_model_manager")
 
@@ -25,19 +49,177 @@ class LlamaModelManager:
     Simulates function calling as per Llama-3 specifications.
     """
 
-    def __init__(self, model_path=MODEL_PATH, llm_executor=None):
+    def __init__(
+        self,
+        model_path=MODEL_PATH,
+        llm_executor=None,
+        status_callback: Optional[Callable[[str], None]] = None,
+    ):
         """Initializes the Llama model manager."""
         self.logger = logging.getLogger("autonomous_system.llama_model_manager")
-        self.llm = Llama(model_path=model_path)
         self.llm_lock = Lock()
         self.llm_executor = llm_executor
         self.llm_context = []
         self.context_limit = 512
+        self.model_path_fallback = model_path
+        self.model_catalog = MODEL_LIST
+        self.active_model_alias = os.getenv("AGENTBOT_MODEL_ALIAS", MODEL_DEFAULT_ALIAS)
+        self.backend = None
+        self.llm = None
+        self.hf_model = None
+        self.hf_tokenizer = None
         self.original_stderr = sys.stderr
         self.available_functions = {
             "search_index": self.fn_search_index,
             "schedule_event": self.fn_schedule_event,
         }
+        self._status_callback = status_callback
+        self._status("Initializing model manager")
+        try:
+            self.load_model(self.active_model_alias)
+        except Exception:
+            if self.active_model_alias != MODEL_DEFAULT_ALIAS:
+                self.logger.warning(
+                    "Failed to load AGENTBOT_MODEL_ALIAS=%s; falling back to %s",
+                    self.active_model_alias,
+                    MODEL_DEFAULT_ALIAS,
+                )
+                self._status(
+                    f"Model alias '{self.active_model_alias}' failed; falling back to '{MODEL_DEFAULT_ALIAS}'"
+                )
+                self.active_model_alias = MODEL_DEFAULT_ALIAS
+                self.load_model(self.active_model_alias)
+            else:
+                raise
+
+    def _status(self, message: str) -> None:
+        self.logger.info(message)
+        if self._status_callback is None:
+            return
+        try:
+            self._status_callback(message)
+        except Exception:
+            # Never let UI status failures break model loading.
+            pass
+
+    def _resolve_alias(self, alias: Optional[str]) -> str:
+        if not alias:
+            return self.active_model_alias
+        cleaned = alias.strip()
+        if not cleaned:
+            return self.active_model_alias
+        return cleaned
+
+    def _resolve_model_spec(self, alias: str) -> Dict[str, Any]:
+        if alias not in self.model_catalog:
+            raise ValueError(f"Unknown model alias: {alias}")
+        spec = dict(self.model_catalog[alias])
+        spec.setdefault("alias", alias)
+        return spec
+
+    def _resolve_llama_model_path(self, spec: Dict[str, Any]) -> str:
+        if self.model_path_fallback and os.path.exists(self.model_path_fallback):
+            self._status(f"Using local llama.cpp model: {self.model_path_fallback}")
+            return self.model_path_fallback
+        repo_id = spec.get("repo_id")
+        filename = spec.get("filename")
+        if not repo_id or not filename:
+            raise RuntimeError(
+                "llama_cpp model spec must define repo_id and filename when local MODEL_PATH is absent."
+            )
+        if hf_hub_download is None:
+            raise RuntimeError(
+                "huggingface_hub is required to resolve GGUF from HF cache. Install huggingface_hub."
+            )
+        self.logger.info(
+            "Resolving llama.cpp model from HF cache: repo=%s file=%s", repo_id, filename
+        )
+        self._status(f"Resolving GGUF from HF cache: {repo_id}/{filename}")
+        return hf_hub_download(repo_id=repo_id, filename=filename)
+
+    def _load_llama_cpp(self, spec: Dict[str, Any]) -> None:
+        if Llama is None:
+            raise RuntimeError("llama_cpp is not installed. Install llama-cpp-python.")
+        model_path = self._resolve_llama_model_path(spec)
+        requested_ctx = int(os.getenv("AGENTBOT_LLAMA_N_CTX", "2048"))
+        self._status(f"Loading llama.cpp backend (n_ctx={requested_ctx})")
+        self.llm = Llama(model_path=model_path, n_ctx=requested_ctx)
+        self.hf_model = None
+        self.hf_tokenizer = None
+        self.backend = "llama_cpp"
+        self.context_limit = requested_ctx
+        self.logger.info(
+            "Active model set: alias=%s backend=%s path=%s n_ctx=%s",
+            spec["alias"],
+            self.backend,
+            model_path,
+            requested_ctx,
+        )
+
+    def _load_transformers(self, spec: Dict[str, Any]) -> None:
+        if AutoModelForCausalLM is None or AutoTokenizer is None:
+            raise RuntimeError(
+                "transformers is not installed. Install transformers and torch."
+            )
+        repo_id = spec.get("repo_id")
+        if not repo_id:
+            raise RuntimeError("transformers model spec must define repo_id.")
+        self.logger.info("Loading transformers model from HF cache: repo=%s", repo_id)
+        self._status(f"Loading tokenizer: {repo_id}")
+        self.hf_tokenizer = AutoTokenizer.from_pretrained(repo_id)
+        config = None
+        if AutoConfig is not None:
+            self._status(f"Loading model config: {repo_id}")
+            config = AutoConfig.from_pretrained(repo_id)
+            # Avoid repeated tied-weights warning spam during load.
+            if getattr(config, "tie_word_embeddings", None) is not False:
+                config.tie_word_embeddings = False
+        os.makedirs(MODEL_TRANSFORMERS_OFFLOAD_DIR, exist_ok=True)
+        self._status(f"Loading transformer weights: {repo_id} (first run may take a while)")
+        self.hf_model = AutoModelForCausalLM.from_pretrained(
+            repo_id,
+            config=config,
+            torch_dtype="auto",
+            device_map="auto",
+            offload_folder=MODEL_TRANSFORMERS_OFFLOAD_DIR,
+            offload_state_dict=True,
+            low_cpu_mem_usage=True,
+        )
+        self.llm = None
+        self.backend = "transformers"
+        self.logger.info("Active model set: alias=%s backend=%s", spec["alias"], self.backend)
+
+    def load_model(self, alias: Optional[str] = None) -> Dict[str, Any]:
+        target_alias = self._resolve_alias(alias)
+        with self.llm_lock:
+            self._status(f"Selecting model alias: {target_alias}")
+            spec = self._resolve_model_spec(target_alias)
+            backend = str(spec.get("backend", "")).strip().lower()
+            if backend == "llama_cpp":
+                self._load_llama_cpp(spec)
+            elif backend == "transformers":
+                self._load_transformers(spec)
+            else:
+                raise RuntimeError(
+                    f"Unsupported backend '{backend}' for alias '{target_alias}'."
+                )
+            self.active_model_alias = target_alias
+            self._status(
+                f"Model ready: alias={target_alias} backend={self.backend}"
+            )
+            return self.get_model_info()
+
+    def list_models(self) -> Dict[str, Dict[str, Any]]:
+        return {name: dict(spec) for name, spec in self.model_catalog.items()}
+
+    def is_busy(self) -> bool:
+        return self.llm_lock.locked()
+
+    def get_model_info(self) -> Dict[str, Any]:
+        spec = dict(self.model_catalog.get(self.active_model_alias, {}))
+        spec["alias"] = self.active_model_alias
+        spec["backend_active"] = self.backend
+        return spec
 
     @contextlib.contextmanager
     def capture_llm_stderr(self):
@@ -65,13 +247,67 @@ class LlamaModelManager:
                     len(prompt),
                     max_tokens,
                 )
-            response = self.llm(prompt, max_tokens=max_tokens, stop=["\n\n"])
-            return response["choices"][0]["text"]
+            if self.backend == "llama_cpp":
+                safe_prompt, safe_max_tokens = self._fit_prompt_and_budget(
+                    prompt, max_tokens
+                )
+                response = self.llm(
+                    safe_prompt,
+                    max_tokens=safe_max_tokens,
+                    stop=["\n\n"],
+                )
+                return response["choices"][0]["text"]
+            if self.backend == "transformers":
+                if self.hf_model is None or self.hf_tokenizer is None:
+                    raise RuntimeError("Transformers model is not loaded.")
+                encoded = self.hf_tokenizer(prompt, return_tensors="pt")
+                model_inputs = dict(encoded)
+                target_device = getattr(self.hf_model, "device", None)
+                if target_device is not None:
+                    model_inputs = {k: v.to(target_device) for k, v in encoded.items()}
+                output_ids = self.hf_model.generate(
+                    **model_inputs,
+                    max_new_tokens=min(max_tokens, MODEL_TRANSFORMERS_MAX_NEW_TOKENS),
+                    do_sample=False,
+                    pad_token_id=self.hf_tokenizer.eos_token_id,
+                )
+                new_tokens = output_ids[0][model_inputs["input_ids"].shape[-1] :]
+                return self.hf_tokenizer.decode(new_tokens, skip_special_tokens=True)
+            raise RuntimeError("No active model backend is loaded.")
+
+    def _fit_prompt_and_budget(self, prompt: str, max_tokens: int):
+        """Ensure llama.cpp calls stay within the configured context window."""
+        if self.backend != "llama_cpp" or self.llm is None:
+            return prompt, max_tokens
+        text = prompt or ""
+        reserve = 32
+        target_ctx = max(256, int(self.context_limit))
+        # Trim by rough character fraction until tokenized input fits.
+        for _ in range(8):
+            prompt_tokens = self.estimate_token_count(text)
+            room = target_ctx - prompt_tokens - reserve
+            if room > 8:
+                return text, max(8, min(max_tokens, room))
+            # Keep the tail of the prompt where latest instruction/context lives.
+            ratio = 0.8
+            if prompt_tokens > 0:
+                ratio = max(0.2, min(0.85, (target_ctx - reserve) / float(prompt_tokens)))
+            keep_chars = max(256, int(math.floor(len(text) * ratio)))
+            text = text[-keep_chars:]
+        # Final fallback: heavily truncate and force tiny generation budget.
+        return text[-512:], min(max_tokens, 16)
 
     def estimate_token_count(self, text):
         """Estimates the number of tokens in the given text."""
-        tokens = self.llm.tokenize(text.encode("utf-8"))
-        return len(tokens)
+        with self.llm_lock:
+            if self.backend == "llama_cpp":
+                tokens = self.llm.tokenize(text.encode("utf-8"))
+                return len(tokens)
+            if self.backend == "transformers":
+                if self.hf_tokenizer is None:
+                    return len((text or "").split())
+                return len(self.hf_tokenizer.encode(text or "", add_special_tokens=False))
+            return len((text or "").split())
 
     def update_context(self, new_entry):
         """Updates the model context with a new entry."""

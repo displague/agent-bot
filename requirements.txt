@@ -1,0 +1,16 @@
+numpy
+soundfile
+sounddevice
+torch
+torchvision
+torchaudio
+transformers
+llama-cpp-python
+huggingface_hub
+python-dotenv
+aiohttp
+sentencepiece
+sphn
+accelerate
+pytest
+-e ./personaplex/moshi

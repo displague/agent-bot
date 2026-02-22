@@ -10,7 +10,25 @@ INDEX_PATH = "index/context_index.json"
 DAILY_SLEEP_START = 23
 DAILY_SLEEP_END = 7
 MAX_WORKERS = 5
-MODEL_PATH = "model.bin"  # Remember to put your actual model path here
+MODEL_PATH = "model.bin"  # Legacy fallback path for local GGUF.
+
+# Model runtime settings
+MODEL_DEFAULT_ALIAS = "default"
+MODEL_LIST = {
+    # Default keeps existing llama.cpp behavior while sourcing GGUF from HF cache.
+    "default": {
+        "backend": "llama_cpp",
+        "repo_id": "TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF",
+        "filename": "tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf",
+    },
+    # Optional transformer backend model.
+    "gpt-oss": {
+        "backend": "transformers",
+        "repo_id": "openai/gpt-oss-20b",
+    },
+}
+MODEL_TRANSFORMERS_MAX_NEW_TOKENS = 256
+MODEL_TRANSFORMERS_OFFLOAD_DIR = "hf_offload"
 
 # PersonaPlex / Moshi settings
 PERSONAPLEX_VOICE_PROMPT = "NATF2.pt"
@@ -23,7 +41,9 @@ PERSONAPLEX_DEVICE = "cuda"
 PERSONAPLEX_CPU_OFFLOAD = False
 PERSONAPLEX_OFFLINE_TIMEOUT_SECONDS = 900
 PERSONAPLEX_PYTHON_BIN = ""
-SMOKE_MODEL_TIMEOUT_SECONDS = 30
+SMOKE_MODEL_TIMEOUT_SECONDS = 60
+INTERACTION_PROCESS_TIMEOUT_SECONDS = 120
+LLM_DIAG_TIMEOUT_SECONDS = 20
 
 # Local voice I/O settings
 VOICE_SAMPLE_RATE = 24000
@@ -31,6 +51,16 @@ VOICE_CAPTURE_KEY_CODE = 18  # Ctrl+R
 VOICE_CAPTURE_KEY_LABEL = "Ctrl+R"
 PERSONAPLEX_SERVER_URL = "https://localhost:8998"
 VOICE_AUTO_START_ON_LAUNCH = True
+VOICE_MODE = "offline_continuous"
+VOICE_ALWAYS_ON = True
+VOICE_CHUNK_SECONDS = 0.4
+VOICE_SILENCE_SECONDS = 0.9
+VOICE_MIN_UTTERANCE_SECONDS = 0.6
+VOICE_INTERJECT_POLICY = "hard"
+VOICE_VAD_RMS_THRESHOLD = 0.012
+VOICE_CONTROL_PREFIX = "\x1f"
+VOICE_OFFLINE_INFER_TIMEOUT_SECONDS = 45
+VOICE_STOP_GRACE_SECONDS = 2.0
 
 # Development/runtime controls
 DEV_DISABLE_AUTONOMOUS = False

@@ -5,11 +5,13 @@ import curses
 import textwrap
 from queue import Queue, Empty as QueueEmpty
 import logging
+import os
+import subprocess
+import time
+from datetime import datetime
 
 from config import (
-    PERSONAPLEX_SERVER_URL,
-    PERSONAPLEX_TEXT_PROMPT,
-    PERSONAPLEX_VOICE_PROMPT,
+    LLM_DIAG_TIMEOUT_SECONDS,
     VOICE_AUTO_START_ON_LAUNCH,
     VOICE_CAPTURE_KEY_CODE,
     VOICE_CAPTURE_KEY_LABEL,
@@ -19,7 +21,9 @@ from smoke_test_runner import (
     run_model_smoke,
     summarize_smoke_result,
 )
-from utils import start_personaplex_server, stop_personaplex_server
+from process_utils import force_exit_now
+from utils import _resolve_personaplex_python
+from voice_loop import VoiceLoop
 
 logger = logging.getLogger("autonomous_system.tui_renderer")
 
@@ -27,12 +31,17 @@ logger = logging.getLogger("autonomous_system.tui_renderer")
 class TUIRenderer:
     COMMANDS = [
         "/help",
+        "/model",
+        "/llm-status",
+        "/llm-diagnose",
         "/smoke",
         "/smoke-model",
         "/smoke-all",
         "/voice-start",
         "/voice-stop",
         "/voice-status",
+        "/voice-diagnose",
+        "/force-quit",
         "/quit",
         "/exit",
     ]
@@ -59,11 +68,8 @@ class TUIRenderer:
         self.audio_waveform = None
         self._stop = False
         self._refresh_interval_seconds = 0.2
-        self._voice_server_handle = None
-        self._pending_voice_event = None
+        self._voice_loop = VoiceLoop(state, interaction_log_manager)
         self.state.setdefault("is_listening", False)
-        self.state.setdefault("voice_prompt", PERSONAPLEX_VOICE_PROMPT)
-        self.state.setdefault("persona_prompt", PERSONAPLEX_TEXT_PROMPT)
         self.state.setdefault("voice_mode", "offline-disabled")
         self.state.setdefault("voice_server_state", "stopped")
         self.state.setdefault("voice_session_state", "disconnected")
@@ -76,25 +82,19 @@ class TUIRenderer:
         curses.curs_set(1)
         self.stdscr.nodelay(True)
         await self.interaction_log_manager.append(
-            f"Type /help for commands. {VOICE_CAPTURE_KEY_LABEL} starts voice server mode. Esc toggles debug."
+            f"Type /help for commands. {VOICE_CAPTURE_KEY_LABEL} starts offline voice mode. Esc toggles debug. Ctrl+D exits."
         )
         if VOICE_AUTO_START_ON_LAUNCH:
             await self._set_voice_state(
                 server="starting",
                 session="disconnected",
                 activity="starting",
-                event="Auto-starting voice server at launch",
+                event="Auto-starting voice loop at launch",
             )
             await self.handle_command("/voice-start")
         try:
             while not self._stop:
                 try:
-                    self._refresh_voice_health()
-                    if self._pending_voice_event:
-                        event = self._pending_voice_event
-                        self._pending_voice_event = None
-                        await self.interaction_log_manager.append(f"Voice: {event}")
-                        self.show_footer_message(f"Voice: {event}")
                     await self.render()
                 except Exception as e:
                     self.logger.exception("TUI render loop error: %s", e)
@@ -102,8 +102,7 @@ class TUIRenderer:
                     await self.interaction_log_manager.append(f"TUI error: {e}")
                 await asyncio.sleep(self._refresh_interval_seconds)
         finally:
-            stop_personaplex_server(self._voice_server_handle)
-            self._voice_server_handle = None
+            await self._voice_loop.stop()
 
     async def _set_voice_state(self, *, server=None, session=None, activity=None, event=None):
         if server is not None:
@@ -117,17 +116,24 @@ class TUIRenderer:
             await self.interaction_log_manager.append(f"Voice: {event}")
             self.show_footer_message(f"Voice: {event}")
 
-    def _refresh_voice_health(self):
-        if self._voice_server_handle is None:
-            return
-        if self._voice_server_handle.process.poll() is not None:
-            self._voice_server_handle = None
-            self.state["voice_mode"] = "offline-disabled"
-            self.state["voice_server_state"] = "stopped"
-            self.state["voice_session_state"] = "disconnected"
-            self.state["voice_activity_state"] = "failed"
-            self.state["voice_last_event"] = "server exited unexpectedly"
-            self._pending_voice_event = "server exited unexpectedly"
+    def _voice_indicator(self) -> str:
+        activity = self.state.get("voice_activity_state", "idle")
+        mapping = {
+            "listening": "L",
+            "thinking": "T",
+            "speaking": "S",
+            "passive": "P",
+            "interrupted": "!",
+            "idle": "-",
+            "starting": "~",
+            "error": "E",
+            "failed": "E",
+        }
+        base = mapping.get(activity, "?")
+        blink = activity in {"thinking", "interrupted"}
+        if blink and (time.monotonic() * 2) % 2 < 1:
+            return " "
+        return base
 
     def _safe_addstr(self, y, x, text, attr=0):
         max_y, max_x = self.stdscr.getmaxyx()
@@ -153,9 +159,11 @@ class TUIRenderer:
         voice_session_state = self.state.get("voice_session_state", "unknown")
         voice_activity_state = self.state.get("voice_activity_state", "unknown")
         voice_last_event = self.state.get("voice_last_event", "none")
+        voice_indicator = self._voice_indicator()
         status_bar = (
             f" Status: {sleep_status}{listening_status}{processing_status} | Unprocessed: {self.state['unprocessed_interactions']} "
             f"| Thoughts: {self.state['ongoing_thoughts']} | Next event: {self.state['next_event']} "
+            f"| V:{voice_indicator} "
             f"| Voice: {voice_mode}/{voice_server_state}/{voice_session_state}/{voice_activity_state} "
             f"| VLast: {voice_last_event} "
         )
@@ -218,6 +226,22 @@ class TUIRenderer:
         """Renders the debug screen."""
         max_y, max_x = self.stdscr.getmaxyx()
         current_y = 1
+        debug_lines = [
+            f"Debug | processing={self.state.get('is_processing')} unprocessed={self.state.get('unprocessed_interactions')} thoughts={self.state.get('ongoing_thoughts')}",
+            f"Debug | voice={self.state.get('voice_mode')}/{self.state.get('voice_server_state')}/{self.state.get('voice_session_state')}/{self.state.get('voice_activity_state')}",
+            f"Debug | last_input={self.state.get('last_processing_input', '')}",
+            f"Debug | last_status={self.state.get('last_processing_status', '')}",
+            f"Debug | last_error={self.state.get('last_processing_error', '')}",
+        ]
+        for item in debug_lines:
+            wrapped = textwrap.wrap(item, max_x)
+            for line in wrapped:
+                if current_y >= max_y - 3:
+                    break
+                self._safe_addstr(current_y, 0, line)
+                current_y += 1
+            if current_y >= max_y - 3:
+                break
         max_log_lines = max_y - 4
         display_log = self.debug_log[
             -(max_log_lines + self.scroll_offset) : (
@@ -235,7 +259,9 @@ class TUIRenderer:
     def render_input_line(self):
         """Renders the input line."""
         max_y, max_x = self.stdscr.getmaxyx()
-        self._safe_addstr(max_y - 2, 0, "Input: " + self.input_buffer[: max_x - 7])
+        max_chars = max(0, max_x - 8)
+        visible_tail = self.input_buffer[-max_chars:] if max_chars else ""
+        self._safe_addstr(max_y - 2, 0, "Input: " + visible_tail)
         try:
             self.stdscr.clrtoeol()
         except curses.error:
@@ -261,6 +287,8 @@ class TUIRenderer:
             self.input_buffer = self.input_buffer[:-1]
         elif key == VOICE_CAPTURE_KEY_CODE:
             await self.handle_command("/voice-start")
+        elif key == 4:  # Ctrl+D
+            await self.handle_command("/quit")
         elif key in (curses.KEY_ENTER, 10, 13):  # Enter key
             if self.input_buffer.strip():
                 normalized = self.input_buffer.strip().lower()
@@ -312,12 +340,18 @@ class TUIRenderer:
             self.show_footer_message("No command matches. Try /help")
 
     async def handle_command(self, command: str):
-        cmd = command.strip().lower()
+        raw = command.strip()
+        cmd = raw.lower()
+        parts = raw.split()
+        model_manager = (
+            getattr(self.functional_agent, "llama_manager", None)
+            if self.functional_agent is not None
+            else None
+        )
         if cmd in {"/quit", "/exit"}:
             await self.interaction_log_manager.append("Shutting down...")
             self.show_footer_message("Shutting down...")
-            stop_personaplex_server(self._voice_server_handle)
-            self._voice_server_handle = None
+            await self._voice_loop.stop()
             self.state["voice_mode"] = "offline-disabled"
             self.state["voice_server_state"] = "stopped"
             self.state["voice_session_state"] = "disconnected"
@@ -325,70 +359,150 @@ class TUIRenderer:
             self.state["voice_last_event"] = "stopped"
             self._stop = True
             return
+        if cmd == "/force-quit":
+            await self.interaction_log_manager.append("Force quitting now...")
+            self.show_footer_message("Force quitting now...")
+            force_exit_now(130)
         if cmd == "/help":
             await self.interaction_log_manager.append(
                 (
-                    "Commands: /help, /smoke, /smoke-model, /smoke-all, "
-                    "/voice-start, /voice-stop, /voice-status, /quit. "
+                    "Commands: /help, /model, /llm-status, /llm-diagnose, /smoke, /smoke-model, /smoke-all, "
+                    "/voice-start, /voice-stop, /voice-status, /voice-diagnose, /quit, /force-quit. "
                     f"Voice start hotkey: {VOICE_CAPTURE_KEY_LABEL}. "
-                    "Keys: Esc=toggle debug, Up/Down=scroll, Tab=autocomplete, Backspace=edit."
+                    "Keys: Esc=toggle debug, Up/Down=scroll, Tab=autocomplete, Backspace=edit, Ctrl+D=quit."
                 )
             )
             self.show_footer_message("Command help added to log.")
             return
-        if cmd == "/voice-status":
-            active = (
-                self._voice_server_handle is not None
-                and self._voice_server_handle.process.poll() is None
-            )
-            log_hint = (
-                f" log={self._voice_server_handle.log_path}"
-                if active and self._voice_server_handle is not None
-                else ""
-            )
+        if cmd == "/model" or cmd.startswith("/model "):
+            if model_manager is None:
+                msg = "Model manager unavailable."
+                await self.interaction_log_manager.append(msg)
+                self.show_footer_message(msg)
+                return
+            if len(parts) == 1:
+                info = model_manager.get_model_info()
+                aliases = ", ".join(model_manager.list_models().keys())
+                msg = (
+                    f"Model active: {info.get('alias')} ({info.get('backend_active')}); "
+                    f"available: {aliases}. Use /model use <alias>."
+                )
+                await self.interaction_log_manager.append(msg)
+                self.show_footer_message(msg)
+                return
+            if len(parts) == 2 and parts[1].lower() in {"list", "ls"}:
+                catalog = model_manager.list_models()
+                details = ", ".join(
+                    f"{name}({spec.get('backend')})" for name, spec in catalog.items()
+                )
+                msg = f"Available models: {details}"
+                await self.interaction_log_manager.append(msg)
+                self.show_footer_message(msg)
+                return
+            if len(parts) == 3 and parts[1].lower() == "use":
+                alias = parts[2]
+                self.show_footer_message(f"Loading model '{alias}'...")
+                try:
+                    info = await asyncio.to_thread(model_manager.load_model, alias)
+                    msg = (
+                        f"Model switched to {info.get('alias')} "
+                        f"({info.get('backend_active')})."
+                    )
+                except Exception as e:
+                    msg = f"Model switch failed: {str(e)[:120]}"
+                await self.interaction_log_manager.append(msg)
+                self.show_footer_message(msg)
+                return
+            usage = "Usage: /model | /model list | /model use <alias>"
+            await self.interaction_log_manager.append(usage)
+            self.show_footer_message(usage)
+            return
+        if cmd == "/llm-status":
+            model_info = model_manager.get_model_info() if model_manager is not None else {}
+            llm_busy = model_manager.is_busy() if model_manager is not None else False
+            elapsed = ""
+            started_at = self.state.get("last_processing_started_at")
+            if self.state.get("is_processing") and started_at:
+                try:
+                    dt = datetime.fromisoformat(started_at)
+                    elapsed = f"{(datetime.now() - dt).total_seconds():.1f}s"
+                except Exception:
+                    elapsed = "unknown"
             msg = (
-                f"Voice server: {'running' if active else 'stopped'} "
-                f"({PERSONAPLEX_SERVER_URL}){log_hint}"
+                f"LLM status: alias={model_info.get('alias')} backend={model_info.get('backend_active')} "
+                f"busy={llm_busy} "
+                f"processing={self.state.get('is_processing')} "
+                f"elapsed={elapsed} "
+                f"unprocessed={self.state.get('unprocessed_interactions')} "
+                f"last_status={self.state.get('last_processing_status', '')} "
+                f"last_error={self.state.get('last_processing_error', '')}"
+            )
+            await self.interaction_log_manager.append(msg[:400])
+            self.show_footer_message("LLM status added to log.")
+            return
+        if cmd == "/llm-diagnose":
+            if model_manager is None:
+                msg = "LLM diagnose: model manager unavailable."
+                await self.interaction_log_manager.append(msg)
+                self.show_footer_message(msg)
+                return
+            if model_manager.is_busy():
+                msg = "LLM diagnose: skipped (LLM busy with active request)."
+                await self.interaction_log_manager.append(msg)
+                self.show_footer_message(msg)
+                return
+            self.show_footer_message("Running LLM diagnose...")
+            try:
+                lines = await asyncio.wait_for(
+                    asyncio.to_thread(self._diagnose_llm_runtime, model_manager),
+                    timeout=LLM_DIAG_TIMEOUT_SECONDS,
+                )
+            except asyncio.TimeoutError:
+                lines = [f"LLM diagnose timeout after {LLM_DIAG_TIMEOUT_SECONDS}s"]
+            for line in lines:
+                await self.interaction_log_manager.append(line)
+            self.show_footer_message("LLM diagnostics added to log.")
+            return
+        if cmd == "/voice-status":
+            active = self._voice_loop.is_running
+            msg = (
+                f"Voice loop: {'running' if active else 'stopped'} "
+                f"mode={self.state.get('voice_mode')} "
+                f"activity={self.state.get('voice_activity_state')}"
             )
             self.state["voice_server_state"] = "running" if active else "stopped"
-            self.state["voice_session_state"] = "unknown" if active else "disconnected"
-            self.state["voice_activity_state"] = "waiting-client" if active else "idle"
+            self.state["voice_session_state"] = "local" if active else "disconnected"
+            self.state["voice_activity_state"] = "listening" if active else "idle"
             self.state["voice_last_event"] = msg
             await self.interaction_log_manager.append(msg)
             self.show_footer_message(msg)
             return
         if cmd == "/voice-start":
-            active = (
-                self._voice_server_handle is not None
-                and self._voice_server_handle.process.poll() is None
-            )
+            active = self._voice_loop.is_running
             if active:
-                msg = f"Voice server already running at {PERSONAPLEX_SERVER_URL}"
+                msg = "Voice loop already running"
                 await self._set_voice_state(
                     server="running",
-                    session="unknown",
-                    activity="waiting-client",
+                    session="local",
+                    activity="listening",
                     event=msg,
                 )
-                self.state["voice_mode"] = "server"
+                self.state["voice_mode"] = "offline-continuous"
                 return
             try:
                 await self._set_voice_state(
                     server="starting",
                     session="disconnected",
                     activity="starting",
-                    event="Starting PersonaPlex voice server",
+                    event="Starting offline continuous voice loop",
                 )
-                self._voice_server_handle = await asyncio.to_thread(start_personaplex_server)
-                self.state["voice_mode"] = "server"
+                await self._voice_loop.start()
+                self.state["voice_mode"] = "offline-continuous"
                 await self._set_voice_state(
                     server="running",
-                    session="unknown",
-                    activity="waiting-client",
-                    event=(
-                        "Server running. Open PersonaPlex UI to begin stream: "
-                        f"{PERSONAPLEX_SERVER_URL}"
-                    ),
+                    session="local",
+                    activity="listening",
+                    event="Offline voice loop running in terminal",
                 )
             except Exception as e:
                 self.logger.error("Voice server start failed: %s", e)
@@ -397,19 +511,24 @@ class TUIRenderer:
                     server="error",
                     session="disconnected",
                     activity="failed",
-                    event=f"Server start failed: {str(e)[:80]}",
+                    event=f"Voice start failed: {str(e)[:80]}",
                 )
             return
         if cmd == "/voice-stop":
-            stop_personaplex_server(self._voice_server_handle)
-            self._voice_server_handle = None
+            await self._voice_loop.stop()
             self.state["voice_mode"] = "offline-disabled"
             await self._set_voice_state(
                 server="stopped",
                 session="disconnected",
                 activity="idle",
-                event="Voice server stopped",
+                event="Voice loop stopped",
             )
+            return
+        if cmd == "/voice-diagnose":
+            diag = await asyncio.to_thread(self._diagnose_voice_runtime)
+            for line in diag:
+                await self.interaction_log_manager.append(line)
+            self.show_footer_message("Voice diagnostics added to log.")
             return
         if cmd in {"/smoke", "/smoke-all"}:
             self.show_footer_message("Running deterministic smoke test...")
@@ -430,17 +549,68 @@ class TUIRenderer:
             self.show_footer_message(model_summary)
             return
         if cmd not in {
+            "/model",
+            "/llm-status",
+            "/llm-diagnose",
             "/smoke",
             "/smoke-all",
             "/quit",
             "/exit",
+            "/force-quit",
             "/voice-start",
             "/voice-stop",
             "/voice-status",
+            "/voice-diagnose",
         }:
             msg = f"Unknown command: {command}. Try /help"
             await self.interaction_log_manager.append(msg)
             self.show_footer_message(msg)
+
+    def _diagnose_voice_runtime(self):
+        lines = []
+        py = _resolve_personaplex_python()
+        lines.append(f"Voice diagnose: personaplex_python={py}")
+        lines.append(f"Voice diagnose: python_exists={os.path.exists(py)}")
+        command = [
+            py,
+            "-c",
+            (
+                "import torch; "
+                "print(f'torch={torch.__version__} cuda_available={torch.cuda.is_available()} "
+                "cuda_version={getattr(torch.version, \"cuda\", None)}')"
+            ),
+        ]
+        try:
+            result = subprocess.run(
+                command,
+                check=False,
+                text=True,
+                capture_output=True,
+                timeout=10,
+            )
+            if result.returncode == 0:
+                lines.append(f"Voice diagnose: {result.stdout.strip()}")
+            else:
+                lines.append(f"Voice diagnose: torch check failed rc={result.returncode}")
+                if result.stderr.strip():
+                    lines.append(f"Voice diagnose stderr: {result.stderr.strip()[:120]}")
+        except Exception as e:
+            lines.append(f"Voice diagnose: failed to run torch check: {str(e)[:120]}")
+        return lines
+
+    def _diagnose_llm_runtime(self, model_manager):
+        lines = []
+        info = model_manager.get_model_info()
+        lines.append(
+            f"LLM diagnose: alias={info.get('alias')} backend={info.get('backend_active')}"
+        )
+        test_prompt = "Reply with exactly: OK"
+        try:
+            result = model_manager.llm_call(test_prompt, 8)
+            lines.append(f"LLM diagnose result: {str(result).strip()[:160]}")
+        except Exception as e:
+            lines.append(f"LLM diagnose error: {str(e)[:200]}")
+        return lines
 
     def process_debug_queue(self):
         """Processes the debug queue."""

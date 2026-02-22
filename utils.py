@@ -6,6 +6,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import threading
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -82,6 +83,19 @@ def capture_microphone_to_wav(
     return output_wav
 
 
+def capture_microphone_chunk(
+    duration_seconds: float,
+    sample_rate: int = VOICE_SAMPLE_RATE,
+) -> np.ndarray:
+    """Capture a short mono chunk from the default microphone."""
+    if sd is None:
+        raise RuntimeError("sounddevice is not installed; cannot capture microphone audio.")
+    frames = max(1, int(duration_seconds * sample_rate))
+    recording = sd.rec(frames, samplerate=sample_rate, channels=1, dtype="float32")
+    sd.wait()
+    return np.asarray(recording).reshape(-1)
+
+
 def play_wav_file(path: str) -> None:
     """Play a WAV file through the default output device."""
     if sd is None:
@@ -89,6 +103,25 @@ def play_wav_file(path: str) -> None:
     data, sample_rate = sf.read(path, always_2d=False)
     sd.play(data, samplerate=sample_rate)
     sd.wait()
+
+
+def play_wav_file_interruptible(path: str, stop_event: Optional[threading.Event] = None) -> bool:
+    """Play a WAV file and optionally stop early when stop_event is set."""
+    if sd is None:
+        raise RuntimeError("sounddevice is not installed; cannot play audio.")
+    data, sample_rate = sf.read(path, always_2d=False)
+    sd.play(data, samplerate=sample_rate)
+    interrupted = False
+    while True:
+        stream = sd.get_stream()
+        if stream is None or not stream.active:
+            break
+        if stop_event is not None and stop_event.is_set():
+            interrupted = True
+            sd.stop()
+            break
+        time.sleep(0.02)
+    return interrupted
 
 
 def _decode_output_tokens(output_text_path: str) -> str:
@@ -107,6 +140,8 @@ def _resolve_personaplex_python() -> str:
         return PERSONAPLEX_PYTHON_BIN
 
     candidates = [
+        Path(".venv/Scripts/python.exe"),
+        Path(".venv/bin/python"),
         Path("personaplex/.venv/Scripts/python.exe"),
         Path("personaplex/.venv/bin/python"),
     ]
@@ -142,8 +177,15 @@ def run_personaplex_offline(
     if output_text is None:
         output_text = os.path.join(tempfile.gettempdir(), "personaplex_output_text.json")
 
-    voice_name = Path(voice_prompt).name
-    resolved_voice_dir = voice_prompt_dir or str(Path(voice_prompt).parent)
+    voice_path = Path(voice_prompt)
+    voice_name = voice_path.name
+    resolved_voice_dir = voice_prompt_dir.strip() if isinstance(voice_prompt_dir, str) else ""
+    if not resolved_voice_dir:
+        parent = str(voice_path.parent)
+        # If only a basename is provided (e.g. NATF2.pt), let moshi.offline
+        # resolve/download voices instead of forcing current directory.
+        if parent not in {"", "."}:
+            resolved_voice_dir = parent
 
     command = [
         _resolve_personaplex_python(),
@@ -197,8 +239,6 @@ def run_personaplex_offline(
 def start_personaplex_server(cpu_offload: bool = PERSONAPLEX_CPU_OFFLOAD) -> PersonaPlexServerHandle:
     """Start PersonaPlex server mode for full-duplex interaction."""
     _load_env_if_present()
-    if not os.getenv("HF_TOKEN"):
-        raise RuntimeError("HF_TOKEN is not set. Set it in environment/.env before starting voice server.")
 
     ssl_dir = tempfile.mkdtemp(prefix="personaplex_ssl_")
     os.makedirs(os.path.dirname(PERSONAPLEX_SERVER_LOG_PATH), exist_ok=True)
@@ -215,11 +255,16 @@ def start_personaplex_server(cpu_offload: bool = PERSONAPLEX_CPU_OFFLOAD) -> Per
     if cpu_offload:
         command.append("--cpu-offload")
     logger.info("Starting PersonaPlex server mode.")
+    child_env = os.environ.copy()
+    # Prefer offline cache when token is absent; avoids unnecessary hub calls.
+    if not child_env.get("HF_TOKEN"):
+        child_env.setdefault("HF_HUB_OFFLINE", "1")
+        child_env.setdefault("TRANSFORMERS_OFFLINE", "1")
     process = subprocess.Popen(
         command,
         stdout=log_file,
         stderr=subprocess.STDOUT,
-        env=os.environ.copy(),
+        env=child_env,
     )
     time.sleep(1.5)
     if process.poll() is not None:
