@@ -37,7 +37,7 @@ from thought_generator import ThoughtGenerator
 from event_compressor import EventCompressor
 from runtime_manager import RuntimeManager
 from voice_loop import VoiceLoop
-from utils import PersonaPlexManager, AudioMultiplexer, RollingAudioBuffer
+from utils import PersonaPlexManager, AudioMultiplexer, RollingAudioBuffer, DebugServer
 from process_utils import force_exit_now
 
 try:
@@ -48,7 +48,7 @@ except Exception:  # pragma: no cover - optional at runtime
 
 def _reset_logs():
     """Clear all log directories."""
-    log_dirs = ["logs", "compressed_logs", "hf_offload", "offload_weights"]
+    log_dirs = ["logs", "compressed_logs"]
     for d in log_dirs:
         if os.path.exists(d):
             try:
