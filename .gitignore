@@ -2,3 +2,10 @@
 personaplex
 __pycache__/
 .pytest_cache/
+.pytest_tmp/
+.pytest_local/
+logs/
+compressed_logs/
+index/
+hf_offload/
+model.bin
