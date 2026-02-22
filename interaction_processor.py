@@ -104,6 +104,19 @@ class InteractionProcessor:
                     interaction = self.interaction_queue.get_nowait()
                     user_input = interaction.get("input", "")
                     audio_waveform = interaction.get("audio_waveform", None)
+                    
+                    # If audio is present but input is empty, transcribe first
+                    if audio_waveform is not None and not user_input:
+                        self.state["processing_phase"] = "Transcribing"
+                        self.logger.info("Transcribing audio waveform...")
+                        user_input = await transcribe_audio(audio_waveform)
+                        self.logger.info(f"Transcribed: {user_input}")
+                        if not user_input:
+                            self.logger.info("Empty transcription, skipping interaction.")
+                            self.state["unprocessed_interactions"] = max(0, self.state["unprocessed_interactions"] - 1)
+                            continue
+                        await self.interaction_log_manager.append(f"Voice Input: {user_input}")
+
                     self.state["is_processing"] = True
                     self.state["last_processing_input"] = (user_input or "")[:240]
                     self.state["last_processing_started_at"] = datetime.now().isoformat()

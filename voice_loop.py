@@ -34,6 +34,7 @@ from utils import (
     capture_microphone_chunk,
     play_wav_file_interruptible,
     run_personaplex_offline,
+    PersonaPlexStreamingSession,
 )
 
 logger = logging.getLogger("autonomous_system.voice_loop")
@@ -65,6 +66,9 @@ class VoiceLoop:
         self._playback_interrupt = threading.Event()
         self._speaking = False
         self._policy = VOICE_INTERJECT_POLICY.lower()
+        self._streaming_session: Optional[PersonaPlexStreamingSession] = None
+        self._streaming_audio_buffer = []
+        self._streaming_text_buffer = ""
 
     def get_recent_audio(self, seconds: float = 5.0) -> np.ndarray:
         """Retrieve the last 'seconds' of audio from the rolling buffer."""
@@ -173,6 +177,29 @@ class VoiceLoop:
                 rms = float(np.sqrt(np.mean(np.square(chunk.astype(np.float32)))))
                 is_speech = rms >= VOICE_VAD_RMS_THRESHOLD
 
+                # Full-duplex streaming path
+                if self.personaplex_manager and not self._speaking:
+                    if self._streaming_session is None:
+                        self._streaming_session = self.personaplex_manager.create_session(
+                            PERSONAPLEX_TEXT_PROMPT, PERSONAPLEX_VOICE_PROMPT
+                        )
+                        # We run start in a thread to not block the listen loop
+                        await asyncio.to_thread(self._streaming_session.start)
+                    
+                    out_audio, out_text = await asyncio.to_thread(self._streaming_session.step, chunk)
+                    
+                    if out_text:
+                        self._streaming_text_buffer += out_text
+                        # Periodically update the UI with what the model is transcribing/thinking
+                        if len(self._streaming_text_buffer) % 20 == 0:
+                            await self._set_activity("thinking", f"Model: {self._streaming_text_buffer[-40:]}")
+
+                    if out_audio is not None and np.abs(out_audio).max() > 0.01:
+                        # Model is starting to speak!
+                        # In true full-duplex, we'd stream this audio out. 
+                        # For now, we collect it and we'll play it when the user stops or if model is confident.
+                        self._streaming_audio_buffer.append(out_audio)
+
                 if is_speech and self._speaking and self._policy == "hard":
                     self._playback_interrupt.set()
                     await self._set_activity("interrupted", "hard interruption requested")
@@ -187,8 +214,23 @@ class VoiceLoop:
 
                 if chunks and silence_s >= VOICE_SILENCE_SECONDS:
                     if speaking_s >= VOICE_MIN_UTTERANCE_SECONDS:
-                        utterance = np.concatenate(chunks)
-                        await self._utterance_queue.put(utterance)
+                        if self._streaming_session and self._streaming_audio_buffer:
+                            # In streaming mode, we already have the output audio!
+                            combined_audio = np.concatenate(self._streaming_audio_buffer)
+                            # Put it in a format process_loop expects or create a new path
+                            # For simplicity now, we'll put it in the queue with a special key
+                            await self._utterance_queue.put({
+                                "type": "streaming_result",
+                                "audio": combined_audio,
+                                "text": self._streaming_text_buffer
+                            })
+                            self._streaming_audio_buffer = []
+                            self._streaming_text_buffer = ""
+                            # Reset session for next turn
+                            self._streaming_session = None
+                        else:
+                            utterance = np.concatenate(chunks)
+                            await self._utterance_queue.put(utterance)
                     chunks = []
                     silence_s = 0.0
                     speaking_s = 0.0
@@ -202,12 +244,55 @@ class VoiceLoop:
     async def _process_loop(self):
         while not self._stop_event.is_set():
             try:
-                utterance = await asyncio.wait_for(self._utterance_queue.get(), timeout=0.25)
+                item = await asyncio.wait_for(self._utterance_queue.get(), timeout=0.25)
             except asyncio.TimeoutError:
                 continue
             except asyncio.CancelledError:
                 raise
             try:
+                if isinstance(item, dict) and item.get("type") == "streaming_result":
+                    # Streaming result path: we already have audio and text
+                    audio_data = item["audio"]
+                    text = item["text"]
+                    
+                    control, spoken_text = parse_control_prefix(text)
+                    await self.interaction_log_manager.append(
+                        f"Voice model (streaming) [{control}]: {spoken_text or '<empty>'}"
+                    )
+                    
+                    if control in {"S", "I"}:
+                        # Save to temp file for playback
+                        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+                            tmp_output = f.name
+                        sf.write(tmp_output, audio_data, VOICE_SAMPLE_RATE)
+                        
+                        try:
+                            self._speaking = True
+                            self._playback_interrupt.clear()
+                            await self._set_activity(
+                                "speaking",
+                                "interjecting" if control == "I" else "speaking",
+                            )
+                            interrupted = await asyncio.to_thread(
+                                play_wav_file_interruptible,
+                                tmp_output,
+                                self._playback_interrupt,
+                            )
+                            self._speaking = False
+                            if interrupted:
+                                await self._set_activity("interrupted", "playback interrupted")
+                            else:
+                                await self._set_activity("listening", "playback complete")
+                        finally:
+                            if os.path.exists(tmp_output):
+                                os.unlink(tmp_output)
+                    else:
+                        await self._set_activity("passive", "model chose passive mode")
+                        await self._set_activity("listening", "resuming listen mode")
+                    continue
+
+                # Legacy utterance path
+                utterance = item
                 await self._set_activity("thinking", "processing utterance")
                 with tempfile.TemporaryDirectory(prefix="voice_loop_") as tmpdir:
                     input_wav = os.path.join(tmpdir, "input.wav")
