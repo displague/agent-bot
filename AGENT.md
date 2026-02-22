@@ -51,4 +51,11 @@ This document outlines the roles, tools, protocols, and guidelines for AI agents
 - **Modes**: Offline continuous mode is the primary runtime path for terminal operation.
 - **Dependencies**: Ensure moshi installed; Opus codec available.
 
+## Project Skills
+
+- **voice-loop-debug** (`.github/skills/voice-loop-debug/SKILL.md`): Triage silent/offline continuous voice-loop behavior, queue drain issues, and debug-screen visibility.
+- **model-load-triage** (`.github/skills/model-load-triage/SKILL.md`): Isolate fetching vs loading delays, offload-folder errors, and model diagnose timeouts.
+- **shutdown-recovery** (`.github/skills/shutdown-recovery/SKILL.md`): Handle stuck shutdowns with bounded graceful stop and force-quit/process-tree kill flows.
+- **env-cuda-alignment** (`.github/skills/env-cuda-alignment/SKILL.md`): Keep app and voice on one `.venv` and verify CUDA-capable torch runtime.
+
 Agents should operate autonomously while coordinating for seamless development.
