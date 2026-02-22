@@ -55,6 +55,55 @@ except ImportError:
 logger = logging.getLogger("autonomous_system.utils")
 
 
+def _ensure_voice_prompt_exists(voice_name: str, repo_id: str = "nvidia/personaplex-7b-v1") -> str:
+    """Ensure the voice prompt exists locally, downloading from HF if needed."""
+    from huggingface_hub import hf_hub_download, list_repo_files
+    import tarfile
+
+    # If it's an absolute path and exists, use it
+    v_path = Path(voice_name)
+    if v_path.is_absolute() and v_path.exists():
+        return str(v_path)
+
+    # Check common local locations
+    v_dir = PERSONAPLEX_VOICE_PROMPT_DIR.strip()
+    candidates = [
+        Path(voice_name),
+        Path(v_dir) / voice_name if v_dir else None,
+        Path("personaplex") / voice_name,
+    ]
+    for cand in [c for c in candidates if c]:
+        if cand.exists():
+            return str(cand)
+
+    # Not found locally, attempt HF download
+    logger.info("Voice prompt '%s' not found locally. Attempting HF download...", voice_name)
+    try:
+        files = list_repo_files(repo_id=repo_id)
+        if voice_name in files:
+            return hf_hub_download(repo_id=repo_id, filename=voice_name)
+        if f"voices/{voice_name}" in files:
+            return hf_hub_download(repo_id=repo_id, filename=f"voices/{voice_name}")
+        
+        # Fallback to voices.tgz
+        if "voices.tgz" in files:
+            logger.info("Prompt not found as standalone. Downloading and extracting voices.tgz...")
+            tgz_path = hf_hub_download(repo_id=repo_id, filename="voices.tgz")
+            extract_dir = Path(tempfile.gettempdir()) / "personaplex_voices"
+            extract_dir.mkdir(parents=True, exist_ok=True)
+            with tarfile.open(tgz_path, "r:gz") as tar:
+                tar.extractall(path=extract_dir)
+            
+            # Find it in extracted dir
+            for root, _, files in os.walk(extract_dir):
+                if voice_name in files:
+                    return str(Path(root) / voice_name)
+    except Exception as e:
+        logger.error("Failed to download voice prompt from HF: %s", e)
+    
+    return voice_name
+
+
 class PersonaPlexStreamingSession:
     """Manages an active, stateful streaming session with PersonaPlex models."""
     
@@ -74,19 +123,7 @@ class PersonaPlexStreamingSession:
         self.manager.load()
         
         # Resolve voice prompt path
-        v_path = Path(self.voice_prompt_path)
-        v_name = v_path.name
-        # Fallback to config if not absolute and exists there
-        v_dir = PERSONAPLEX_VOICE_PROMPT_DIR.strip()
-        
-        # Check if file exists relative to v_dir
-        if v_dir and (Path(v_dir) / v_name).exists():
-            final_voice_prompt = str(Path(v_dir) / v_name)
-        elif v_path.exists():
-            final_voice_prompt = str(v_path)
-        else:
-            # Last resort: try just the name and let moshi handle it
-            final_voice_prompt = v_name
+        final_voice_prompt = _ensure_voice_prompt_exists(self.voice_prompt_path)
 
         with self._lock:
             self.lm_gen = LMGen(
@@ -261,17 +298,7 @@ class PersonaPlexManager:
         final_text_prompt = text_prompt or PERSONAPLEX_TEXT_PROMPT
         
         # Resolve voice prompt path
-        v_path = Path(voice_prompt_path)
-        v_name = v_path.name
-        v_dir = PERSONAPLEX_VOICE_PROMPT_DIR.strip()
-        
-        # Check if file exists relative to v_dir
-        if v_dir and (Path(v_dir) / v_name).exists():
-            final_voice_prompt = str(Path(v_dir) / v_name)
-        elif v_path.exists():
-            final_voice_prompt = str(v_path)
-        else:
-            final_voice_prompt = v_name
+        final_voice_prompt = _ensure_voice_prompt_exists(voice_prompt_path)
             
         logger.debug("PersonaPlexManager: using voice prompt path: %s", final_voice_prompt)
 
@@ -625,19 +652,8 @@ async def run_personaplex_offline(
     if output_text is None:
         output_text = os.path.join(tempfile.gettempdir(), "personaplex_output_text.json")
 
-    voice_path = Path(voice_prompt)
-    voice_name = voice_path.name
-    resolved_voice_dir = voice_prompt_dir.strip() if isinstance(voice_prompt_dir, str) else ""
-    if not resolved_voice_dir:
-        resolved_voice_dir = PERSONAPLEX_VOICE_PROMPT_DIR.strip()
-
-    # Final check for absolute path vs relative to dir
-    if resolved_voice_dir and (Path(resolved_voice_dir) / voice_name).exists():
-        final_voice_path_str = str(Path(resolved_voice_dir) / voice_name)
-    elif voice_path.exists():
-        final_voice_path_str = str(voice_path)
-    else:
-        final_voice_path_str = voice_name
+    # Resolve voice prompt path
+    final_voice_path_str = _ensure_voice_prompt_exists(voice_prompt)
 
     command = [
         _resolve_personaplex_python(),
@@ -661,40 +677,40 @@ async def run_personaplex_offline(
     if cpu_offload:
         command.append("--cpu-offload")
 
-    # Attempt direct in-process inference if available
-    if moshi_run_inference is not None:
-        logger.info("Running PersonaPlex offline inference directly (in-process).")
-        try:
-            await asyncio.to_thread(
-                moshi_run_inference,
-                input_wav=input_wav,
-                output_wav=output_wav,
-                output_text=output_text,
-                text_prompt=text_prompt,
-                voice_prompt_path=str(Path(resolved_voice_dir) / voice_name) if resolved_voice_dir else voice_name,
-                tokenizer_path=None,
-                moshi_weight=None,
-                mimi_weight=None,
-                hf_repo="nvidia/personaplex-7b-v1",
-                device=device,
-                seed=seed,
-                temp_audio=0.0, # Default greedy
-                temp_text=0.0,
-                topk_audio=1,
-                topk_text=1,
-                greedy=True,
-                save_voice_prompt_embeddings=False,
-                cpu_offload=cpu_offload
-            )
-            generated_text = _decode_output_tokens(output_text)
-            return {
-                "output_wav": output_wav,
-                "output_text_path": output_text,
-                "generated_text": generated_text,
-                "stdout": "in-process execution",
-            }
-        except Exception as e:
-            logger.warning("Direct PersonaPlex inference failed: %s. Falling back to subprocess.", e)
+        # Attempt direct in-process inference if available
+        if moshi_run_inference is not None:
+            logger.info("Running PersonaPlex offline inference directly (in-process).")
+            try:
+                await asyncio.to_thread(
+                    moshi_run_inference,
+                    input_wav=input_wav,
+                    output_wav=output_wav,
+                    output_text=output_text,
+                    text_prompt=text_prompt,
+                    voice_prompt_path=final_voice_path_str,
+                    tokenizer_path=None,
+                    moshi_weight=None,
+                    mimi_weight=None,
+                    hf_repo="nvidia/personaplex-7b-v1",
+                    device=device,
+                    seed=seed,
+                    temp_audio=0.0, # Default greedy
+                    temp_text=0.0,
+                    topk_audio=1,
+                    topk_text=1,
+                    greedy=True,
+                    save_voice_prompt_embeddings=False,
+                    cpu_offload=cpu_offload
+                )
+                generated_text = _decode_output_tokens(output_text)
+                return {
+                    "output_wav": output_wav,
+                    "output_text_path": output_text,
+                    "generated_text": generated_text,
+                    "stdout": "in-process execution",
+                }
+            except Exception as e:
+                logger.warning("Direct PersonaPlex inference failed: %s. Falling back to subprocess.", e)
 
     logger.info("Running PersonaPlex offline inference via subprocess.")
     result = subprocess.run(

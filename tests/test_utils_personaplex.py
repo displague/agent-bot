@@ -33,7 +33,9 @@ async def test_run_personaplex_offline_returns_generated_text(monkeypatch, tmp_p
         return None
 
     # Patch the in-process path which is tried first
-    with patch('utils.moshi_run_inference', new=mock_moshi_run_inference):
+    with patch('utils.moshi_run_inference', new=mock_moshi_run_inference), \
+         patch('utils._ensure_voice_prompt_exists', return_value="C:/voices/NATF2.pt"):
+        
         async def mock_to_thread(func, *args, **kwargs):
             return await func(*args, **kwargs)
             

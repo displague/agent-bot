@@ -162,7 +162,18 @@ async def main(stdscr=None, renderer_name="auto", renderer_reason="", dev_mode=F
     _show_startup_status(stdscr, startup_lines)
 
     def _status_callback(message: str):
-        startup_lines.append(f"Stage: {message}")
+        # If this message is a completion (contains 'loaded' or 'Model ready'), 
+        # try to replace the matching 'Loading' line if it's the last one.
+        if ("loaded" in message or "ready" in message) and startup_lines:
+            last = startup_lines[-1]
+            # Simple heuristic: if the last line started the load for this component, replace it
+            if "Loading" in last or "starting" in last:
+                # E.g. 'Stage: Loading tokenizer' vs 'Stage: Tokenizer loaded in 2.6s'
+                startup_lines[-1] = f"Stage: {message}"
+            else:
+                startup_lines.append(f"Stage: {message}")
+        else:
+            startup_lines.append(f"Stage: {message}")
         _show_startup_status(stdscr, startup_lines)
 
     index_manager = IndexManager()
