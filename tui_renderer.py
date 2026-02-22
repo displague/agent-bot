@@ -41,6 +41,8 @@ class TUIRenderer:
         "/voice-stop",
         "/voice-status",
         "/voice-diagnose",
+        "/wake",
+        "/sleep",
         "/force-quit",
         "/quit",
         "/exit",
@@ -70,6 +72,9 @@ class TUIRenderer:
         self._stop = False
         self._refresh_interval_seconds = 0.2
         self._voice_loop = voice_loop or VoiceLoop(state, interaction_log_manager)
+        self.input_history = []
+        self.history_index = -1
+        self.cursor_pos = 0
         self.state.setdefault("is_listening", False)
         self.state.setdefault("voice_mode", "offline-disabled")
         self.state.setdefault("voice_server_state", "stopped")
@@ -197,9 +202,11 @@ class TUIRenderer:
         self.process_debug_queue()
 
     async def render_main_screen(self):
-        """Renders the main screen."""
+        """Renders the main screen with correct scrolling logic."""
         max_y, max_x = self.stdscr.getmaxyx()
         current_y = 1
+        
+        # Room for thought lines
         current_thoughts = self.state.get("current_thoughts", [])
         for thought in current_thoughts:
             wrapped_thought = textwrap.wrap(f"Thought: {thought}", max_x)
@@ -208,20 +215,32 @@ class TUIRenderer:
                     break
                 self._safe_addstr(current_y, 0, line)
                 current_y += 1
+        
+        # Remaining room for interaction log
+        log_height = max_y - current_y - 3
+        if log_height <= 0:
+            return
 
-        max_log_lines = max_y - current_y - 3
+        # Fetch enough entries to potentially fill the screen, considering wraps
+        # We fetch more than log_height just in case
         display_log = await self.interaction_log_manager.get_display_log(
-            max_log_lines, self.scroll_offset
+            max_items=log_height + 50, scroll_offset=self.scroll_offset
         )
-        for interaction in display_log:
-            if current_y >= max_y - 3:
-                break
-            wrapped_interaction = textwrap.wrap(interaction, max_x)
-            for line in wrapped_interaction:
-                if current_y >= max_y - 3:
+        
+        # We render from bottom to top to fill the screen correctly
+        rendered_lines = []
+        for interaction in reversed(display_log):
+            wrapped = textwrap.wrap(interaction, max_x)
+            for line in reversed(wrapped):
+                rendered_lines.insert(0, line)
+                if len(rendered_lines) >= log_height:
                     break
-                self._safe_addstr(current_y, 0, line)
-                current_y += 1
+            if len(rendered_lines) >= log_height:
+                break
+        
+        for line in rendered_lines:
+            self._safe_addstr(current_y, 0, line)
+            current_y += 1
 
     def render_debug_screen(self):
         """Renders the debug screen."""
@@ -258,13 +277,23 @@ class TUIRenderer:
                 current_y += 1
 
     def render_input_line(self):
-        """Renders the input line."""
+        """Renders the input line with cursor support."""
         max_y, max_x = self.stdscr.getmaxyx()
+        # Header "Input: " takes 7 chars
         max_chars = max(0, max_x - 8)
-        visible_tail = self.input_buffer[-max_chars:] if max_chars else ""
-        self._safe_addstr(max_y - 2, 0, "Input: " + visible_tail)
+        
+        # Determine sliding window for long input
+        start_char = 0
+        if self.cursor_pos >= max_chars:
+            start_char = self.cursor_pos - max_chars + 1
+            
+        visible_text = self.input_buffer[start_char:start_char + max_chars]
+        self._safe_addstr(max_y - 2, 0, "Input: " + visible_text)
         try:
             self.stdscr.clrtoeol()
+            # Position cursor on the correct char in the UI
+            cursor_ui_x = 7 + (self.cursor_pos - start_char)
+            self.stdscr.move(max_y - 2, min(cursor_ui_x, max_x - 1))
         except curses.error:
             pass
 
@@ -282,17 +311,40 @@ class TUIRenderer:
         key = self.stdscr.getch()
         if key == -1:
             return
+        
+        max_y, max_x = self.stdscr.getmaxyx()
+
         if key == 27:  # Esc key
             self.active_screen = 2 if self.active_screen == 1 else 1
+            self.scroll_offset = 0
         elif key in (curses.KEY_BACKSPACE, 127, 8):  # Backspace variants
-            self.input_buffer = self.input_buffer[:-1]
+            if self.cursor_pos > 0:
+                self.input_buffer = self.input_buffer[:self.cursor_pos - 1] + self.input_buffer[self.cursor_pos:]
+                self.cursor_pos -= 1
+        elif key == curses.KEY_DC:  # Delete key
+            if self.cursor_pos < len(self.input_buffer):
+                self.input_buffer = self.input_buffer[:self.cursor_pos] + self.input_buffer[self.cursor_pos + 1:]
+        elif key == curses.KEY_LEFT:
+            self.cursor_pos = max(0, self.cursor_pos - 1)
+        elif key == curses.KEY_RIGHT:
+            self.cursor_pos = min(len(self.input_buffer), self.cursor_pos + 1)
+        elif key == curses.KEY_HOME:
+            self.cursor_pos = 0
+        elif key == curses.KEY_END:
+            self.cursor_pos = len(self.input_buffer)
         elif key == VOICE_CAPTURE_KEY_CODE:
             await self.handle_command("/voice-start")
         elif key == 4:  # Ctrl+D
             await self.handle_command("/quit")
         elif key in (curses.KEY_ENTER, 10, 13):  # Enter key
             if self.input_buffer.strip():
-                normalized = self.input_buffer.strip().lower()
+                # Add to history
+                cmd_text = self.input_buffer.strip()
+                if not self.input_history or self.input_history[-1] != cmd_text:
+                    self.input_history.append(cmd_text)
+                self.history_index = -1
+                
+                normalized = cmd_text.lower()
                 if normalized in {"quit", "exit"}:
                     await self.handle_command("/quit")
                 elif self.input_buffer.startswith("/"):
@@ -310,19 +362,41 @@ class TUIRenderer:
                         f"Input: {self.input_buffer}"
                     )
                 self.input_buffer = ""
+                self.cursor_pos = 0
         elif key == curses.KEY_UP:
+            if self.input_history:
+                if self.history_index == -1:
+                    self.history_index = len(self.input_history) - 1
+                else:
+                    self.history_index = max(0, self.history_index - 1)
+                self.input_buffer = self.input_history[self.history_index]
+                self.cursor_pos = len(self.input_buffer)
+        elif key == curses.KEY_DOWN:
+            if self.history_index != -1:
+                if self.history_index < len(self.input_history) - 1:
+                    self.history_index += 1
+                    self.input_buffer = self.input_history[self.history_index]
+                else:
+                    self.history_index = -1
+                    self.input_buffer = ""
+                self.cursor_pos = len(self.input_buffer)
+        elif key == curses.KEY_PPAGE:  # Page Up
             max_log_length = (
                 len(self.interaction_log_manager.interaction_log)
                 if self.active_screen == 1
                 else len(self.debug_log)
             )
-            self.scroll_offset = min(self.scroll_offset + 1, max_log_length)
-        elif key == curses.KEY_DOWN:
-            self.scroll_offset = max(self.scroll_offset - 1, 0)
+            # Scroll half a screen or a full screen
+            scroll_by = max_y - 5
+            self.scroll_offset = min(self.scroll_offset + scroll_by, max_log_length - 1)
+        elif key == curses.KEY_NPAGE:  # Page Down
+            scroll_by = max_y - 5
+            self.scroll_offset = max(0, self.scroll_offset - scroll_by)
         elif key == 9 and self.input_buffer.startswith("/"):  # Tab for command autocomplete
             self.autocomplete_command()
         elif 32 <= key <= 126:  # Printable characters
-            self.input_buffer += chr(key)
+            self.input_buffer = self.input_buffer[:self.cursor_pos] + chr(key) + self.input_buffer[self.cursor_pos:]
+            self.cursor_pos += 1
 
         self.render_input_line()
         try:
@@ -531,6 +605,19 @@ class TUIRenderer:
                 await self.interaction_log_manager.append(line)
             self.show_footer_message("Voice diagnostics added to log.")
             return
+        if cmd == "/wake":
+            self.state["manual_wake"] = True
+            self.state["is_sleeping"] = False
+            msg = "Agent manually woken from sleep."
+            await self.interaction_log_manager.append(msg)
+            self.show_footer_message(msg)
+            return
+        if cmd == "/sleep":
+            self.state["manual_wake"] = False
+            msg = "Agent returned to autonomous sleep cycle."
+            await self.interaction_log_manager.append(msg)
+            self.show_footer_message(msg)
+            return
         if cmd in {"/smoke", "/smoke-all"}:
             self.show_footer_message("Running deterministic smoke test...")
             deterministic_result = await run_deterministic_smoke()
@@ -576,8 +663,8 @@ class TUIRenderer:
             py,
             "-c",
             (
-                "import torch; "
-                "print(f'torch={torch.__version__} cuda_available={torch.cuda.is_available()} "
+                "import torch; import moshi; "
+                "print(f'torch={torch.__version__} moshi_available=True cuda_available={torch.cuda.is_available()} "
                 "cuda_version={getattr(torch.version, \"cuda\", None)}')"
             ),
         ]

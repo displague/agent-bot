@@ -234,6 +234,19 @@ class SimpleRenderer:
                 print(line)
                 await self.interaction_log_manager.append(line)
             return
+        if cmd == "/wake":
+            self.state["manual_wake"] = True
+            self.state["is_sleeping"] = False
+            msg = "Agent manually woken from sleep."
+            print(msg)
+            await self.interaction_log_manager.append(msg)
+            return
+        if cmd == "/sleep":
+            self.state["manual_wake"] = False
+            msg = "Agent returned to autonomous sleep cycle."
+            print(msg)
+            await self.interaction_log_manager.append(msg)
+            return
         if cmd not in {"/model", "/llm-status", "/llm-diagnose", "/smoke", "/smoke-all", "/force-quit"}:
             print(f"Unknown command: {command}. Try /help")
 
@@ -246,8 +259,8 @@ class SimpleRenderer:
             py,
             "-c",
             (
-                "import torch; "
-                "print(f'torch={torch.__version__} cuda_available={torch.cuda.is_available()} "
+                "import torch; import moshi; "
+                "print(f'torch={torch.__version__} moshi_available=True cuda_available={torch.cuda.is_available()} "
                 "cuda_version={getattr(torch.version, \"cuda\", None)}')"
             ),
         ]
