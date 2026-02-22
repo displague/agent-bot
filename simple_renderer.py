@@ -99,6 +99,7 @@ class SimpleRenderer:
 
     async def handle_command(self, command: str):
         raw = command.strip()
+        await self.interaction_log_manager.append(f"Command: {raw}")
         cmd = raw.lower()
         parts = raw.split()
         model_manager = (
@@ -256,15 +257,7 @@ class SimpleRenderer:
         lines.append(f"Voice diagnose: personaplex_python={py}")
         lines.append(f"Voice diagnose: python_exists={os.path.exists(py)}")
         
-        check_script = (
-            "import sys; "
-            "results = []; "
-            "try: import torch; results.append(f'torch={torch.__version__} cuda={torch.cuda.is_available()} cu_ver={getattr(torch.version, \"cuda\", \"N/A\")}'); "
-            "except ImportError: results.append('torch=MISSING'); "
-            "try: import moshi; results.append('moshi=OK'); "
-            "except ImportError: results.append('moshi=MISSING'); "
-            "print(' '.join(results))"
-        )
+        check_script = "import sys; results = []; try: import torch; results.append(f'torch={torch.__version__} cuda={torch.cuda.is_available()} cu_ver={getattr(torch.version, \"cuda\", \"N/A\")}'); except ImportError: results.append('torch=MISSING'); try: import moshi; results.append('moshi=OK'); except ImportError: results.append('moshi=MISSING'); print(' '.join(results))"
         
         command = [py, "-c", check_script]
         try:

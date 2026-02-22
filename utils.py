@@ -23,6 +23,7 @@ from config import (
     PERSONAPLEX_CPU_OFFLOAD,
     PERSONAPLEX_DEVICE,
     PERSONAPLEX_USE_CUDA_GRAPHS,
+    PERSONAPLEX_OPTIMIZE,
     PERSONAPLEX_OFFLINE_TIMEOUT_SECONDS,
     PERSONAPLEX_PYTHON_BIN,
     PERSONAPLEX_TEXT_PROMPT,
@@ -125,11 +126,8 @@ class PersonaPlexStreamingSession:
         from moshi.offline import warmup, wrap_with_system_tags
         import moshi.models.lm
         
-        # Patch CUDAGraphed to always be disabled
-        original_init = moshi.models.lm.CUDAGraphed.__init__
-        def patched_init(self, func, warmup_steps=1, disable=False):
-            original_init(self, func, warmup_steps=warmup_steps, disable=True)
-        moshi.models.lm.CUDAGraphed.__init__ = patched_init
+        # Patch CUDAGraphed based on manager's optimization strategy
+        self.manager._apply_optimizations()
         
         self.manager.load()
         
@@ -232,6 +230,44 @@ class PersonaPlexManager:
             except Exception:
                 pass
 
+    def _apply_optimizations(self):
+        """Apply torch.compile and CUDA graph optimizations based on config."""
+        opt = PERSONAPLEX_OPTIMIZE.lower()
+        if opt == "eager":
+            logger.info("PersonaPlexManager: forcing eager mode (no optimizations).")
+            self._patch_cuda_graphs(disable=True)
+            os.environ["NO_TORCH_COMPILE"] = "1"
+            return
+
+        # Handle 'auto' or explicit 'compile'/'graphs'
+        use_compile = (opt in ["auto", "compile", "graphs"])
+        use_graphs = (opt in ["auto", "graphs"])
+
+        if use_compile:
+            logger.info("PersonaPlexManager: enabling torch.compile (lazy).")
+            os.environ.pop("NO_TORCH_COMPILE", None)
+        else:
+            os.environ["NO_TORCH_COMPILE"] = "1"
+
+        if use_graphs:
+            logger.info("PersonaPlexManager: allowing CUDA graphs.")
+            self._patch_cuda_graphs(disable=False)
+        else:
+            self._patch_cuda_graphs(disable=True)
+
+    def _patch_cuda_graphs(self, disable: bool):
+        """Patch moshi.models.lm.CUDAGraphed to set the disable flag."""
+        try:
+            import moshi.models.lm
+            original_init = moshi.models.lm.CUDAGraphed.__init__
+            def patched_init(self, func, warmup_steps=1, disable_orig=False):
+                # We ignore the model's 'disable' hint and use our global one
+                original_init(self, func, warmup_steps=warmup_steps, disable=disable)
+            moshi.models.lm.CUDAGraphed.__init__ = patched_init
+            logger.info("PersonaPlexManager: patched moshi CUDAGraphed (disable=%s)", disable)
+        except Exception as e:
+            logger.warning("PersonaPlexManager: failed to patch moshi CUDA graphs: %s", e)
+
     def load(self):
         """Load models into VRAM if not already loaded."""
         if self.mimi is not None:
@@ -241,17 +277,8 @@ class PersonaPlexManager:
             logger.error("moshi package not available for in-process loading.")
             raise RuntimeError("moshi package not available for in-process loading.")
 
-        # Force disable CUDA graphs in moshi internally before loading
-        try:
-            import moshi.models.lm
-            # Patch CUDAGraphed to always be disabled
-            original_init = moshi.models.lm.CUDAGraphed.__init__
-            def patched_init(self, func, warmup_steps=1, disable=False):
-                original_init(self, func, warmup_steps=warmup_steps, disable=True)
-            moshi.models.lm.CUDAGraphed.__init__ = patched_init
-            logger.info("PersonaPlexManager: patched moshi.models.lm.CUDAGraphed to force-disable graphs.")
-        except Exception as e:
-            logger.warning("PersonaPlexManager: failed to patch moshi CUDA graphs: %s", e)
+        # Apply optimizations before loading modules
+        self._apply_optimizations()
 
         def get_vram():
             if torch is not None and torch.cuda.is_available():
@@ -319,11 +346,8 @@ class PersonaPlexManager:
         logger.info("PersonaPlexManager: starting inference for prompt: %s", text_prompt[:100])
         import moshi.models.lm
         
-        # Patch CUDAGraphed to always be disabled
-        original_init = moshi.models.lm.CUDAGraphed.__init__
-        def patched_init(self, func, warmup_steps=1, disable=False):
-            original_init(self, func, warmup_steps=warmup_steps, disable=True)
-        moshi.models.lm.CUDAGraphed.__init__ = patched_init
+        # Apply optimizations based on strategy
+        self._apply_optimizations()
         
         self.load()
         from moshi.offline import warmup, wrap_with_system_tags
