@@ -253,11 +253,11 @@ class PersonaPlexManager:
                 def _handle_module(prefix: str, module: torch.nn.Module, recurse: bool = True, is_root: bool = False):
                     propagate = True
                     if isinstance(module, moshi.modules.streaming.StreamingModule):
-                        # The BUG: Moshi skips the module if _streaming_propagate is False,
-                        # even if it's the root we just called .streaming() on!
                         if module._streaming_propagate or is_root:
+                            # logger.debug(f"Streaming: processing {prefix} (propagate={module._streaming_propagate}, root={is_root})")
                             fn(prefix, module)
                         else:
+                            # logger.debug(f"Streaming: skipping {prefix} and children")
                             propagate = False
                     if not recurse:
                         return
@@ -265,13 +265,12 @@ class PersonaPlexManager:
                         for name, child in module.named_children():
                             _handle_module(prefix + ("." if prefix else "") + name, child)
 
-                # Pass is_root=True for the initial call
                 _handle_module("", self, recurse=False, is_root=True)
                 for name, child in self.named_children():
                     _handle_module(name, child)
             
             moshi.modules.streaming.StreamingModule._apply_named_streaming = patched_apply_named_streaming
-            logger.info("PersonaPlexManager: patched StreamingModule._apply_named_streaming to fix propagation bug.")
+            logger.info("PersonaPlexManager: patched StreamingModule._apply_named_streaming.")
         except Exception as e:
             logger.warning("PersonaPlexManager: failed to patch moshi StreamingModule: %s", e)
 
@@ -765,18 +764,29 @@ def play_wav_file_interruptible(path: str, stop_event: Optional[threading.Event]
     """Play a WAV file and optionally stop early when stop_event is set."""
     if sd is None:
         raise RuntimeError("sounddevice is not installed; cannot play audio.")
+    
+    logger.info("Playing audio file: %s", path)
     data, sample_rate = sf.read(path, always_2d=False)
+    logger.debug("Read %d samples at %d Hz", len(data), sample_rate)
+    
     sd.play(data, samplerate=sample_rate)
     interrupted = False
+    
+    # Wait for playback to finish
     while True:
         stream = sd.get_stream()
         if stream is None or not stream.active:
+            # Note: sd.get_stream() might not be reliable for checking active status on all platforms
+            # sd.wait() is safer but not interruptible easily without a thread
             break
         if stop_event is not None and stop_event.is_set():
             interrupted = True
             sd.stop()
+            logger.info("Playback interrupted.")
             break
         time.sleep(0.02)
+    
+    logger.info("Playback finished.")
     return interrupted
 
 

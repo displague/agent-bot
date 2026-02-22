@@ -30,12 +30,7 @@ from config import (
     VOICE_STOP_GRACE_SECONDS,
     VOICE_VAD_RMS_THRESHOLD,
 )
-from utils import (
-    capture_microphone_chunk,
-    play_wav_file_interruptible,
-    run_personaplex_offline,
-    PersonaPlexStreamingSession,
-)
+import utils
 
 logger = logging.getLogger("autonomous_system.voice_loop")
 
@@ -66,7 +61,7 @@ class VoiceLoop:
         self._playback_interrupt = threading.Event()
         self._speaking = False
         self._policy = VOICE_INTERJECT_POLICY.lower()
-        self._streaming_session: Optional[PersonaPlexStreamingSession] = None
+        self._streaming_session: Optional[utils.PersonaPlexStreamingSession] = None
         self._streaming_audio_buffer = []
         self._streaming_text_buffer = ""
 
@@ -288,7 +283,7 @@ class VoiceLoop:
                                 "interjecting" if control == "I" else "speaking",
                             )
                             interrupted = await asyncio.to_thread(
-                                play_wav_file_interruptible,
+                                utils.play_wav_file_interruptible,
                                 tmp_output,
                                 self._playback_interrupt,
                             )
@@ -330,7 +325,7 @@ class VoiceLoop:
                         from utils import _decode_output_tokens
                         text = _decode_output_tokens(output_text)
                     else:
-                        result = await run_personaplex_offline(
+                        result = await utils.run_personaplex_offline(
                             input_wav,
                             output_wav,
                             output_text=output_text,
@@ -351,11 +346,12 @@ class VoiceLoop:
                             "speaking",
                             "interjecting" if control == "I" else "speaking",
                         )
-                        interrupted = await asyncio.to_thread(
-                            play_wav_file_interruptible,
-                            output_wav,
-                            self._playback_interrupt,
-                        )
+                                                            interrupted = await asyncio.to_thread(
+                                                                utils.play_wav_file_interruptible,
+                                                                output_wav,
+                                                                self._playback_interrupt,
+                                                            )
+                        
                         self._speaking = False
                         if interrupted:
                             await self._set_activity("interrupted", "playback interrupted")

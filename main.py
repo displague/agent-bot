@@ -260,7 +260,7 @@ async def main(stdscr=None, renderer_name="auto", renderer_reason="", dev_mode=F
             state,
             interaction_queue,
             interaction_log_manager,
-            functional_agent=interaction_processor.functional_agent,
+            interaction_processor=interaction_processor,
             voice_loop=voice_loop,
         )
     else:
@@ -268,7 +268,7 @@ async def main(stdscr=None, renderer_name="auto", renderer_reason="", dev_mode=F
             state,
             interaction_queue,
             interaction_log_manager,
-            functional_agent=interaction_processor.functional_agent,
+            interaction_processor=interaction_processor,
             voice_loop=voice_loop,
         )
     thought_generator = ThoughtGenerator(

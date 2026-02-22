@@ -27,13 +27,13 @@ class SimpleRenderer:
         state,
         interaction_queue,
         interaction_log_manager,
-        functional_agent=None,
+        interaction_processor=None,
         voice_loop=None,
     ):
         self.state = state
         self.interaction_queue = interaction_queue
         self.interaction_log_manager = interaction_log_manager
-        self.functional_agent = functional_agent
+        self.interaction_processor = interaction_processor
         self._stop = False
         self._last_log_offset = 0
         self._log_pump_task = None
@@ -253,14 +253,47 @@ class SimpleRenderer:
             except Exception as e:
                 print(f"Test tone failed: {e}")
             return
+        if cmd == "/voice-devices":
+            try:
+                import sounddevice as sd
+                print(sd.query_devices())
+            except Exception as e:
+                print(f"Failed to list audio devices: {e}")
+            return
         if cmd == "/logic-reload":
             import importlib
             import functional_agent
             import interaction_processor
+            import utils
             try:
+                print("Hot-reloading logic modules...")
+                if self.interaction_processor:
+                    self.interaction_processor.request_stop()
+                
+                importlib.reload(utils)
                 importlib.reload(functional_agent)
                 importlib.reload(interaction_processor)
-                print("Logic modules reloaded successfully.")
+                
+                from interaction_processor import InteractionProcessor
+                from functional_agent import FunctionalAgent
+                
+                p_manager = getattr(self.interaction_processor, "personaplex_manager", None)
+                llama_manager = getattr(self.interaction_processor, "llama_manager", None)
+                
+                new_processor = InteractionProcessor(
+                    self.interaction_queue,
+                    self.state,
+                    llama_manager,
+                    self.interaction_log_manager,
+                    None,
+                    voice_loop=self._voice_loop,
+                    personaplex_manager=p_manager
+                )
+                new_processor.functional_agent = FunctionalAgent(llama_manager, state=self.state)
+                self.interaction_processor = new_processor
+                
+                asyncio.create_task(new_processor.start())
+                print("Logic and Utils modules reloaded and processor restarted.")
             except Exception as e:
                 print(f"Logic reload failed: {e}")
             return

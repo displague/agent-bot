@@ -54,7 +54,7 @@ class TUIRenderer:
         state,
         interaction_queue,
         interaction_log_manager,
-        functional_agent=None,
+        interaction_processor=None,
         voice_loop=None,
     ):
         self.logger = logging.getLogger("autonomous_system.tui_renderer")
@@ -62,7 +62,7 @@ class TUIRenderer:
         self.state = state
         self.interaction_queue = interaction_queue
         self.interaction_log_manager = interaction_log_manager
-        self.functional_agent = functional_agent
+        self.interaction_processor = interaction_processor
         self.debug_queue = Queue()
         self.active_screen = 1
         self.input_buffer = ""
@@ -580,16 +580,67 @@ class TUIRenderer:
             await self.interaction_log_manager.append(msg)
             self.show_footer_message(msg)
             return
+        if cmd == "/voice-devices":
+            try:
+                import sounddevice as sd
+                devices = str(sd.query_devices())
+                for line in devices.split('\n'):
+                    await self.interaction_log_manager.append(f"Audio Device: {line}")
+                self.show_footer_message("Audio devices listed in log.")
+            except Exception as e:
+                msg = f"Failed to list audio devices: {e}"
+                await self.interaction_log_manager.append(msg)
+                self.show_footer_message(msg)
+            return
         if cmd == "/logic-reload":
             import importlib
             import functional_agent
             import interaction_processor
+            import utils
             try:
+                msg = "Hot-reloading logic modules..."
+                await self.interaction_log_manager.append(msg)
+                self.show_footer_message(msg)
+                
+                # 1. Stop current processor if it exists
+                if self.interaction_processor:
+                    self.interaction_processor.request_stop()
+                    # We can't easily await the task here without a reference to it,
+                    # but request_stop will make it exit its loop shortly.
+                
+                # 2. Reload modules
+                importlib.reload(utils)
                 importlib.reload(functional_agent)
                 importlib.reload(interaction_processor)
-                msg = "Logic modules reloaded successfully."
+                
+                # 3. Re-instantiate
+                from interaction_processor import InteractionProcessor
+                from functional_agent import FunctionalAgent
+                
+                # Get the manager from the old processor
+                p_manager = getattr(self.interaction_processor, "personaplex_manager", None)
+                llama_manager = getattr(self.interaction_processor, "llama_manager", None)
+                
+                new_processor = InteractionProcessor(
+                    self.interaction_queue,
+                    self.state,
+                    llama_manager,
+                    self.interaction_log_manager,
+                    None, # index_manager (could be passed)
+                    voice_loop=self.voice_loop,
+                    personaplex_manager=p_manager
+                )
+                # Re-bind components
+                new_processor.functional_agent = FunctionalAgent(llama_manager, state=self.state)
+                self.interaction_processor = new_processor
+                
+                # 4. Start the new processor task
+                asyncio.create_task(new_processor.start())
+                
+                msg = "Logic and Utils modules reloaded and processor restarted."
             except Exception as e:
                 msg = f"Logic reload failed: {e}"
+                self.logger.exception("Logic reload failed")
             await self.interaction_log_manager.append(msg)
             self.show_footer_message(msg)
             return

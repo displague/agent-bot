@@ -21,7 +21,7 @@ from config import (
     VOICE_OFFLINE_INFER_TIMEOUT_SECONDS,
     SKIP_DEEP_REASONING,
 )
-from utils import extract_text_features, extract_audio_features, run_personaplex_offline, play_wav_file_interruptible, transcribe_audio
+import utils
 
 logger = logging.getLogger("autonomous_system.interaction_processor")
 
@@ -82,7 +82,7 @@ class InteractionProcessor:
                         output_wav
                     )
                 else:
-                    await run_personaplex_offline(
+                    await utils.run_personaplex_offline(
                         input_wav,
                         output_wav,
                         text_prompt=filler,
@@ -92,7 +92,7 @@ class InteractionProcessor:
                 
                 if os.path.exists(output_wav):
                     await asyncio.to_thread(
-                        play_wav_file_interruptible,
+                        utils.play_wav_file_interruptible,
                         output_wav,
                         getattr(self.voice_loop, "_playback_interrupt", None)
                     )
@@ -114,7 +114,7 @@ class InteractionProcessor:
                         if audio_waveform is not None and not user_input:
                             self.state["processing_phase"] = "Transcribing"
                             self.logger.info("Transcribing audio waveform...")
-                            user_input = await transcribe_audio(audio_waveform)
+                            user_input = await utils.transcribe_audio(audio_waveform)
                             self.logger.info(f"Transcribed: {user_input}")
                             if not user_input:
                                 self.logger.info("Empty transcription, skipping interaction.")
@@ -131,7 +131,7 @@ class InteractionProcessor:
                         self.logger.info(f"Processing interaction: {user_input}")
 
                         if audio_waveform is not None:
-                            audio_features = extract_audio_features(audio_waveform)
+                            audio_features = utils.extract_audio_features(audio_waveform)
 
                         override_response = interaction.get("override_response")
                         if override_response:
@@ -175,7 +175,7 @@ class InteractionProcessor:
                                         output_wav
                                     )
                                 else:
-                                    await run_personaplex_offline(
+                                    await utils.run_personaplex_offline(
                                         input_wav,
                                         output_wav,
                                         text_prompt=response,
@@ -185,7 +185,7 @@ class InteractionProcessor:
                                 
                                 if os.path.exists(output_wav):
                                     await asyncio.to_thread(
-                                        play_wav_file_interruptible,
+                                        utils.play_wav_file_interruptible,
                                         output_wav,
                                         getattr(self.voice_loop, "_playback_interrupt", None)
                                     )
