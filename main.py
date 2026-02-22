@@ -22,6 +22,7 @@ from interaction_processor import InteractionProcessor
 from thought_generator import ThoughtGenerator
 from event_compressor import EventCompressor
 from runtime_manager import RuntimeManager
+from voice_loop import VoiceLoop
 from process_utils import force_exit_now
 
 try:
@@ -156,10 +157,15 @@ async def main(stdscr=None, renderer_name="auto", renderer_reason="", dev_mode=F
         startup_stage["detail"] = f"Stage: {message}"
         _show_startup_status(stdscr, startup_lines + [startup_stage["detail"]])
 
+    index_manager = IndexManager()
+    interaction_log_manager = InteractionLogManager()
+    voice_loop = VoiceLoop(state, interaction_log_manager)
+
     llama_manager = LlamaModelManager(
         model_path=MODEL_PATH,
         llm_executor=runtime_manager.llm_executor,
         status_callback=_status_callback,
+        voice_loop=voice_loop,
     )
 
     _show_startup_status(
@@ -171,8 +177,6 @@ async def main(stdscr=None, renderer_name="auto", renderer_reason="", dev_mode=F
         ],
     )
 
-    index_manager = IndexManager()
-    interaction_log_manager = InteractionLogManager()
     event_scheduler = EventScheduler(
         state, interaction_log_manager, index_manager, runtime_manager=runtime_manager
     )
@@ -188,6 +192,7 @@ async def main(stdscr=None, renderer_name="auto", renderer_reason="", dev_mode=F
             interaction_queue,
             interaction_log_manager,
             functional_agent=interaction_processor.functional_agent,
+            voice_loop=voice_loop,
         )
     else:
         ui_renderer = SimpleRenderer(
@@ -195,6 +200,7 @@ async def main(stdscr=None, renderer_name="auto", renderer_reason="", dev_mode=F
             interaction_queue,
             interaction_log_manager,
             functional_agent=interaction_processor.functional_agent,
+            voice_loop=voice_loop,
         )
     thought_generator = ThoughtGenerator(
         state, llama_manager, interaction_log_manager, event_scheduler

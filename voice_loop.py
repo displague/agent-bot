@@ -1,4 +1,5 @@
 import asyncio
+import collections
 import logging
 import os
 import subprocess
@@ -61,6 +62,18 @@ class VoiceLoop:
         self._playback_interrupt = threading.Event()
         self._speaking = False
         self._policy = VOICE_INTERJECT_POLICY.lower()
+        # 10s rolling buffer: each chunk is VOICE_CHUNK_SECONDS
+        max_chunks = int(10.0 / VOICE_CHUNK_SECONDS)
+        self._rolling_buffer = collections.deque(maxlen=max_chunks)
+
+    def get_recent_audio(self, seconds: float = 5.0) -> np.ndarray:
+        """Retrieve the last 'seconds' of audio from the rolling buffer."""
+        chunks_to_get = int(seconds / VOICE_CHUNK_SECONDS)
+        available = list(self._rolling_buffer)
+        tail = available[-chunks_to_get:] if chunks_to_get < len(available) else available
+        if not tail:
+            return np.array([], dtype=np.float32)
+        return np.concatenate(tail)
 
     async def start(self):
         if self.is_running:
@@ -151,6 +164,7 @@ class VoiceLoop:
                 chunk = np.asarray(chunk).reshape(-1)
                 if chunk.size == 0:
                     continue
+                self._rolling_buffer.append(chunk)
                 rms = float(np.sqrt(np.mean(np.square(chunk.astype(np.float32)))))
                 is_speech = rms >= VOICE_VAD_RMS_THRESHOLD
 

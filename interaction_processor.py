@@ -31,7 +31,7 @@ class InteractionProcessor:
         self.llama_manager = llama_manager
         self.interaction_log_manager = interaction_log_manager
         self.index_manager = index_manager
-        self.functional_agent = FunctionalAgent(self.llama_manager)
+        self.functional_agent = FunctionalAgent(self.llama_manager, state=self.state)
         self.logger = logging.getLogger("autonomous_system.interaction_processor")
         self._stop_event = asyncio.Event()
 

@@ -28,6 +28,7 @@ class SimpleRenderer:
         interaction_queue,
         interaction_log_manager,
         functional_agent=None,
+        voice_loop=None,
     ):
         self.state = state
         self.interaction_queue = interaction_queue
@@ -36,7 +37,7 @@ class SimpleRenderer:
         self._stop = False
         self._last_log_offset = 0
         self._log_pump_task = None
-        self._voice_loop = VoiceLoop(state, interaction_log_manager)
+        self._voice_loop = voice_loop or VoiceLoop(state, interaction_log_manager)
 
     async def start(self):
         print("Simple mode active (no curses).")

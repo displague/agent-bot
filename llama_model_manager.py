@@ -54,6 +54,7 @@ class LlamaModelManager:
         model_path=MODEL_PATH,
         llm_executor=None,
         status_callback: Optional[Callable[[str], None]] = None,
+        voice_loop=None,
     ):
         """Initializes the Llama model manager."""
         self.logger = logging.getLogger("autonomous_system.llama_model_manager")
@@ -68,10 +69,12 @@ class LlamaModelManager:
         self.llm = None
         self.hf_model = None
         self.hf_tokenizer = None
+        self.voice_loop = voice_loop
         self.original_stderr = sys.stderr
         self.available_functions = {
             "search_index": self.fn_search_index,
             "schedule_event": self.fn_schedule_event,
+            "inspect_audio_snippet": self.fn_inspect_audio_snippet,
         }
         self._status_callback = status_callback
         self._status("Initializing model manager")
@@ -367,6 +370,19 @@ Notes:"""
             f"Simulating scheduling event: {event_type} with message: {message}"
         )
         return f"Scheduled {event_type} event with message: {message}"
+
+    def fn_inspect_audio_snippet(self, seconds: float = 5.0):
+        """Inspects the last 'seconds' of audio for non-verbal context."""
+        if self.voice_loop is None:
+            return "Error: Voice loop not connected to model manager."
+        
+        audio = self.voice_loop.get_recent_audio(seconds)
+        if audio.size == 0:
+            return "No audio captured in the buffer yet."
+        
+        from utils import extract_audio_features
+        features = extract_audio_features(audio)
+        return f"Audio Snippet ({seconds}s) Features: {features}"
 
     async def run_phase(self, phase_name, prompt, notes):
         """Runs a single phase by calling the LLM and handling function calls."""

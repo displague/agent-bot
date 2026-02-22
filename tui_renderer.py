@@ -53,6 +53,7 @@ class TUIRenderer:
         interaction_queue,
         interaction_log_manager,
         functional_agent=None,
+        voice_loop=None,
     ):
         self.logger = logging.getLogger("autonomous_system.tui_renderer")
         self.stdscr = stdscr
@@ -68,7 +69,7 @@ class TUIRenderer:
         self.audio_waveform = None
         self._stop = False
         self._refresh_interval_seconds = 0.2
-        self._voice_loop = VoiceLoop(state, interaction_log_manager)
+        self._voice_loop = voice_loop or VoiceLoop(state, interaction_log_manager)
         self.state.setdefault("is_listening", False)
         self.state.setdefault("voice_mode", "offline-disabled")
         self.state.setdefault("voice_server_state", "stopped")
@@ -227,7 +228,7 @@ class TUIRenderer:
         max_y, max_x = self.stdscr.getmaxyx()
         current_y = 1
         debug_lines = [
-            f"Debug | processing={self.state.get('is_processing')} unprocessed={self.state.get('unprocessed_interactions')} thoughts={self.state.get('ongoing_thoughts')}",
+            f"Debug | phase={self.state.get('processing_phase', 'idle')} processing={self.state.get('is_processing')} unprocessed={self.state.get('unprocessed_interactions')} thoughts={self.state.get('ongoing_thoughts')}",
             f"Debug | voice={self.state.get('voice_mode')}/{self.state.get('voice_server_state')}/{self.state.get('voice_session_state')}/{self.state.get('voice_activity_state')}",
             f"Debug | last_input={self.state.get('last_processing_input', '')}",
             f"Debug | last_status={self.state.get('last_processing_status', '')}",

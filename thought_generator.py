@@ -26,7 +26,7 @@ class ThoughtGenerator:
         self.llama_manager = llama_manager
         self.interaction_log_manager = interaction_log_manager
         self.event_scheduler = event_scheduler
-        self.functional_agent = FunctionalAgent(self.llama_manager)
+        self.functional_agent = FunctionalAgent(self.llama_manager, state=self.state)
         self.logger = logging.getLogger("autonomous_system.thought_generator")
         self._semaphore = asyncio.Semaphore(THOUGHT_MAX_CONCURRENCY)
         self._stop_event = asyncio.Event()
