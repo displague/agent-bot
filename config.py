@@ -13,10 +13,14 @@ MAX_WORKERS = 5
 MODEL_PATH = "model.bin"  # Legacy fallback path for local GGUF.
 
 # Model runtime settings
-MODEL_DEFAULT_ALIAS = "default"
+MODEL_DEFAULT_ALIAS = "gemma-it"
 MODEL_LIST = {
-    # Default keeps existing llama.cpp behavior while sourcing GGUF from HF cache.
-    "default": {
+    "gemma-it": {
+        "backend": "transformers",
+        "repo_id": "google/gemma-3n-E2E-it",
+    },
+    # Tiny model for lightweight/CPU-only testing.
+    "tiny": {
         "backend": "llama_cpp",
         "repo_id": "TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF",
         "filename": "tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf",

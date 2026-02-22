@@ -238,6 +238,7 @@ async def main(stdscr=None, renderer_name="auto", renderer_reason="", dev_mode=F
             )
     finally:
         logger.info("Starting shutdown sequence")
+        ui_task.cancel()
         interaction_processor.request_stop()
         thought_generator.request_stop()
         
