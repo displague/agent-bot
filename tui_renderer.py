@@ -580,6 +580,39 @@ class TUIRenderer:
             await self.interaction_log_manager.append(msg)
             self.show_footer_message(msg)
             return
+        if cmd == "/logic-reload":
+            import importlib
+            import functional_agent
+            import interaction_processor
+            try:
+                importlib.reload(functional_agent)
+                importlib.reload(interaction_processor)
+                msg = "Logic modules reloaded successfully."
+            except Exception as e:
+                msg = f"Logic reload failed: {e}"
+            await self.interaction_log_manager.append(msg)
+            self.show_footer_message(msg)
+            return
+        if cmd.startswith("/voice-say "):
+            text = raw[11:].strip()
+            if not text:
+                return
+            msg = f"Injecting voice response: {text}"
+            await self.interaction_log_manager.append(msg)
+            self.show_footer_message(msg)
+            # Use InteractionProcessor to handle the injection
+            self.interaction_queue.put_nowait({"input": "[Direct Injection]", "audio_waveform": None, "override_response": text})
+            return
+        if cmd.startswith("/set-persona "):
+            new_persona = raw[13:].strip()
+            if not new_persona:
+                return
+            import config
+            config.PERSONAPLEX_TEXT_PROMPT = new_persona
+            msg = f"Persona updated: {new_persona[:50]}..."
+            await self.interaction_log_manager.append(msg)
+            self.show_footer_message(msg)
+            return
         if cmd == "/voice-start":
             active = self._voice_loop.is_running
             if active:

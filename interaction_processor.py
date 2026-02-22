@@ -133,20 +133,26 @@ class InteractionProcessor:
                         if audio_waveform is not None:
                             audio_features = extract_audio_features(audio_waveform)
 
-                        # Trigger reflexive verbal filler concurrently with deep reasoning
-                        filler_task = asyncio.create_task(self._trigger_verbal_filler())
-
-                        if SKIP_DEEP_REASONING:
-                            self.logger.info("Skipping deep reasoning per config.")
-                            response = "Okay."
+                        override_response = interaction.get("override_response")
+                        if override_response:
+                            response = override_response
+                            self.logger.info(f"Using override response: {response}")
                         else:
-                            # Process request with multi-phase approach
-                            response = await asyncio.wait_for(
-                                self.functional_agent.handle_request(user_input),
-                                timeout=INTERACTION_PROCESS_TIMEOUT_SECONDS,
-                            )
+                            # Trigger reflexive verbal filler concurrently with deep reasoning
+                            filler_task = asyncio.create_task(self._trigger_verbal_filler())
 
-                        await filler_task
+                            if SKIP_DEEP_REASONING:
+                                self.logger.info("Skipping deep reasoning per config.")
+                                response = "Okay."
+                            else:
+                                # Process request with multi-phase approach
+                                response = await asyncio.wait_for(
+                                    self.functional_agent.handle_request(user_input),
+                                    timeout=INTERACTION_PROCESS_TIMEOUT_SECONDS,
+                                )
+
+                            await filler_task
+                        
                         self.logger.info(f"Response: {response}")
 
                         # Speak final deep response aloud

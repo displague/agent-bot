@@ -253,6 +253,32 @@ class SimpleRenderer:
             except Exception as e:
                 print(f"Test tone failed: {e}")
             return
+        if cmd == "/logic-reload":
+            import importlib
+            import functional_agent
+            import interaction_processor
+            try:
+                importlib.reload(functional_agent)
+                importlib.reload(interaction_processor)
+                print("Logic modules reloaded successfully.")
+            except Exception as e:
+                print(f"Logic reload failed: {e}")
+            return
+        if cmd.startswith("/voice-say "):
+            text = raw[11:].strip()
+            if not text:
+                return
+            print(f"Injecting voice response: {text}")
+            self.interaction_queue.put_nowait({"input": "[Direct Injection]", "audio_waveform": None, "override_response": text})
+            return
+        if cmd.startswith("/set-persona "):
+            new_persona = raw[13:].strip()
+            if not new_persona:
+                return
+            import config
+            config.PERSONAPLEX_TEXT_PROMPT = new_persona
+            print(f"Persona updated: {new_persona[:50]}...")
+            return
         if cmd == "/voice-diagnose":
             for line in self._diagnose_voice_runtime():
                 print(line)

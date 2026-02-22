@@ -212,7 +212,20 @@ async def main(stdscr=None, renderer_name="auto", renderer_reason="", dev_mode=F
     await rolling_buffer.start()
 
     personaplex_manager = PersonaPlexManager(status_callback=_status_callback)
+    
+    # Initialize InteractionProcessor before renderers to allow hot-reloading reference
+    interaction_processor = InteractionProcessor(
+        interaction_queue,
+        state,
+        None, # llama_manager set below
+        interaction_log_manager,
+        index_manager,
+        voice_loop=None, # voice_loop set below
+        personaplex_manager=personaplex_manager,
+    )
+
     voice_loop = VoiceLoop(state, interaction_log_manager, personaplex_manager=personaplex_manager, audio_multiplexer=audio_multiplexer)
+    interaction_processor.voice_loop = voice_loop
 
     llama_manager = None
     if not skip_reasoning:
@@ -225,15 +238,19 @@ async def main(stdscr=None, renderer_name="auto", renderer_reason="", dev_mode=F
     else:
         _show_startup_status(stdscr, startup_lines + ["Stage: Skipping LLM load (deep reasoning disabled)"])
 
+    interaction_processor.llama_manager = llama_manager
+    # Re-init functional agent if llama_manager changed
+    from functional_agent import FunctionalAgent
+    interaction_processor.functional_agent = FunctionalAgent(llama_manager, state=state)
+
     # Explicitly load PersonaPlex models during startup to show progress
     await asyncio.to_thread(personaplex_manager.load)
 
+    # Initial greeting to confirm voice is working
+    interaction_queue.put_nowait({"input": "Hello!", "audio_waveform": None})
+
     event_scheduler = EventScheduler(
         state, interaction_log_manager, index_manager, runtime_manager=runtime_manager
-    )
-    interaction_processor = InteractionProcessor(
-        interaction_queue, state, llama_manager, interaction_log_manager, index_manager,
-        voice_loop=voice_loop, personaplex_manager=personaplex_manager
     )
     if stdscr is not None:
         from tui_renderer import TUIRenderer  # noqa: PLC0415
@@ -265,10 +282,14 @@ async def main(stdscr=None, renderer_name="auto", renderer_reason="", dev_mode=F
         state=state,
     )
 
+    # Debug Server (Hot Socket)
+    debug_server = DebugServer(command_handler=ui_renderer.handle_command, state=state)
+    
     ui_task = runtime_manager.register_task(asyncio.create_task(ui_renderer.start()))
     background_tasks = [
         runtime_manager.register_task(asyncio.create_task(event_scheduler.start())),
         runtime_manager.register_task(asyncio.create_task(interaction_processor.start())),
+        runtime_manager.register_task(asyncio.create_task(debug_server.start())),
     ]
     if not dev_mode:
         background_tasks.append(

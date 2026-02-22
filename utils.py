@@ -707,6 +707,60 @@ def play_test_tone(duration: float = 1.0, freq: float = 440.0):
     sd.wait()
 
 
+class DebugServer:
+    """A lightweight JSON socket server for live interaction and monitoring."""
+    def __init__(self, host="127.0.0.1", port=9999, command_handler=None, state=None):
+        self.host = host
+        self.port = port
+        self.command_handler = command_handler
+        self.state = state
+        self._server = None
+
+    async def start(self):
+        self._server = await asyncio.start_server(self._handle_client, self.host, self.port)
+        logger.info(f"DebugServer: listening on {self.host}:{self.port}")
+        async with self._server:
+            await self._server.serve_forever()
+
+    async def _handle_client(self, reader, writer):
+        addr = writer.get_extra_info('peername')
+        logger.debug(f"DebugServer: accepted connection from {addr}")
+        try:
+            while True:
+                data = await reader.readline()
+                if not data:
+                    break
+                line = data.decode().strip()
+                if not line:
+                    continue
+                
+                try:
+                    payload = json.loads(line)
+                    msg_type = payload.get("type", "command")
+                    
+                    if msg_type == "command" and self.command_handler:
+                        cmd = payload.get("data")
+                        logger.info(f"DebugServer: injecting command: {cmd}")
+                        # Wrap in task to not block the reader
+                        asyncio.create_task(self.command_handler(cmd))
+                        writer.write(json.dumps({"status": "ok", "message": f"Command '{cmd}' enqueued"}).encode() + b"\n")
+                    elif msg_type == "state":
+                        # Convert state to something JSON-serializable if needed
+                        serializable_state = {k: v for k, v in self.state.items() if isinstance(v, (str, int, float, bool, list, dict, type(None)))}
+                        writer.write(json.dumps({"status": "ok", "state": serializable_state}).encode() + b"\n")
+                    else:
+                        writer.write(json.dumps({"status": "error", "message": "Unknown request type"}).encode() + b"\n")
+                except Exception as e:
+                    writer.write(json.dumps({"status": "error", "message": str(e)}).encode() + b"\n")
+                
+                await writer.drain()
+        except Exception as e:
+            logger.error(f"DebugServer client error: {e}")
+        finally:
+            writer.close()
+            await writer.wait_closed()
+
+
 def play_wav_file_interruptible(path: str, stop_event: Optional[threading.Event] = None) -> bool:
     """Play a WAV file and optionally stop early when stop_event is set."""
     if sd is None:
