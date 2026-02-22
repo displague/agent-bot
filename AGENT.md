@@ -47,4 +47,12 @@ This document outlines the roles, tools, protocols, and guidelines for AI agents
 - **env-cuda-alignment** (`.github/skills/env-cuda-alignment/SKILL.md`): Verify bfloat16 compatibility and `moshi` package visibility.
 - **multi-modal-diagnose**: Verify `AutoProcessor` state and audio-tool feedback loops.
 
+### **Phase 10: Audio Output Transformation (DSP Path)**
+*   **Goal:** Allow the agent to transform its own spoken voice via tools.
+*   **Action:**
+    1.  Implement a transformable audio output pipeline between PersonaPlex and the sound drivers.
+    2.  Add a `set_voice_filter(filter_type, params)` tool.
+    3.  Support real-time DSP effects like pitch-shifting (e.g., lower/higher tone) or robotic modulation.
+    4.  Ensure the implementation is cross-platform (avoiding Windows-only APIs where possible).
+
 Agents should operate autonomously while coordinating for seamless development.
