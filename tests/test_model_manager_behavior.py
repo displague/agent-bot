@@ -5,11 +5,6 @@ import pytest
 from unittest.mock import MagicMock, patch, AsyncMock
 from llama_model_manager import LlamaModelManager
 
-@pytest.fixture(autouse=True)
-def mock_model_load():
-    with patch('llama_model_manager.LlamaModelManager.load_model'):
-        yield
-
 @pytest.mark.asyncio
 async def test_model_manager_tool_feedback_loop():
     # Mock manager dependencies

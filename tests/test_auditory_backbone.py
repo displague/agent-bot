@@ -1,6 +1,7 @@
 import asyncio
 import numpy as np
 import pytest
+from unittest.mock import patch, AsyncMock
 from utils import AudioMultiplexer, RollingAudioBuffer
 
 @pytest.mark.asyncio
