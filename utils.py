@@ -123,6 +123,14 @@ class PersonaPlexStreamingSession:
     def start(self):
         """Initialize the session: load models, run warmup, and step system prompts."""
         from moshi.offline import warmup, wrap_with_system_tags
+        import moshi.models.lm
+        
+        # Patch CUDAGraphed to always be disabled
+        original_init = moshi.models.lm.CUDAGraphed.__init__
+        def patched_init(self, func, warmup_steps=1, disable=False):
+            original_init(self, func, warmup_steps=warmup_steps, disable=True)
+        moshi.models.lm.CUDAGraphed.__init__ = patched_init
+        
         self.manager.load()
         
         # Resolve voice prompt path
@@ -233,6 +241,18 @@ class PersonaPlexManager:
             logger.error("moshi package not available for in-process loading.")
             raise RuntimeError("moshi package not available for in-process loading.")
 
+        # Force disable CUDA graphs in moshi internally before loading
+        try:
+            import moshi.models.lm
+            # Patch CUDAGraphed to always be disabled
+            original_init = moshi.models.lm.CUDAGraphed.__init__
+            def patched_init(self, func, warmup_steps=1, disable=False):
+                original_init(self, func, warmup_steps=warmup_steps, disable=True)
+            moshi.models.lm.CUDAGraphed.__init__ = patched_init
+            logger.info("PersonaPlexManager: patched moshi.models.lm.CUDAGraphed to force-disable graphs.")
+        except Exception as e:
+            logger.warning("PersonaPlexManager: failed to patch moshi CUDA graphs: %s", e)
+
         def get_vram():
             if torch is not None and torch.cuda.is_available():
                 return torch.cuda.memory_allocated() / (1024**3)
@@ -294,6 +314,14 @@ class PersonaPlexManager:
     def infer(self, text_prompt: str, voice_prompt_path: str, input_wav_path: str, output_wav_path: str, output_text_path: Optional[str] = None):
         """Synchronous inference implementation using the warm models."""
         logger.info("PersonaPlexManager: starting inference for prompt: %s", text_prompt[:100])
+        import moshi.models.lm
+        
+        # Patch CUDAGraphed to always be disabled
+        original_init = moshi.models.lm.CUDAGraphed.__init__
+        def patched_init(self, func, warmup_steps=1, disable=False):
+            original_init(self, func, warmup_steps=warmup_steps, disable=True)
+        moshi.models.lm.CUDAGraphed.__init__ = patched_init
+        
         self.load()
         from moshi.offline import warmup, wrap_with_system_tags
         
