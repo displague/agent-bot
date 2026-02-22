@@ -441,7 +441,8 @@ class PersonaPlexManager:
                 # Capture text tokens (k=0)
                 text_token = tokens[0, 0].item()
                 if text_token not in {0, 1, 2, 3}: # Skip BOS/EOS/PAD
-                    all_text_tokens.append(self.text_tokenizer.IdToPiece(text_token))
+                    piece = self.text_tokenizer.IdToPiece(text_token)
+                    all_text_tokens.append(piece)
 
                 # Decode agent tokens (k=1..dep_q+1)
                 # dep_q is the number of audio codebooks

@@ -177,6 +177,9 @@ class VoiceLoop:
                 rms = float(np.sqrt(np.mean(np.square(chunk.astype(np.float32)))))
                 is_speech = rms >= VOICE_VAD_RMS_THRESHOLD
 
+                # VAD Muting: if it's not speech, feed silence to the model to avoid noise accumulation
+                chunk_to_process = chunk if is_speech else np.zeros_like(chunk)
+
                 # Full-duplex streaming path
                 if self.personaplex_manager and not self._speaking:
                     if self._streaming_session is None:
@@ -186,7 +189,7 @@ class VoiceLoop:
                         # We run start in a thread to not block the listen loop
                         await asyncio.to_thread(self._streaming_session.start)
                     
-                    out_audio, out_text = await asyncio.to_thread(self._streaming_session.step, chunk)
+                    out_audio, out_text = await asyncio.to_thread(self._streaming_session.step, chunk_to_process)
                     
                     if out_text:
                         self._streaming_text_buffer += out_text
@@ -289,9 +292,12 @@ class VoiceLoop:
                         finally:
                             if os.path.exists(tmp_output):
                                 os.unlink(tmp_output)
+                    elif control == "P":
+                        await self._set_activity("passive", "Model chose passive mode (listening).")
+                        await asyncio.sleep(0.5)
+                        await self._set_activity("listening", "Resuming listen mode.")
                     else:
-                        await self._set_activity("passive", "model chose passive mode")
-                        await self._set_activity("listening", "resuming listen mode")
+                        await self._set_activity("listening", "Model choosing next turn...")
                     continue
 
                 # Legacy utterance path
