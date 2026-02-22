@@ -1,11 +1,14 @@
-import asyncio
 import os
-import signal
 import sys
-from pathlib import Path
 
-# Disable torch compile early to avoid Dynamo/meta-tensor errors in PersonaPlex
+# Disable brittle optimizations early
 os.environ["NO_TORCH_COMPILE"] = "1"
+os.environ["TORCH_COMPILE_DISABLE"] = "1"
+os.environ["NO_CUDA_GRAPH"] = "1"
+
+import asyncio
+import signal
+from pathlib import Path
 
 # Ensure PersonaPlex/Moshi is in path
 project_root = Path(__file__).parent.absolute()
