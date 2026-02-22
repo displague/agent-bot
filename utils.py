@@ -76,12 +76,17 @@ class PersonaPlexStreamingSession:
         # Resolve voice prompt path
         v_path = Path(self.voice_prompt_path)
         v_name = v_path.name
+        # Fallback to config if not absolute and exists there
         v_dir = PERSONAPLEX_VOICE_PROMPT_DIR.strip()
-        if not v_dir:
-            v_parent = str(v_path.parent)
-            if v_parent not in {"", "."}:
-                v_dir = v_parent
-        final_voice_prompt = str(Path(v_dir) / v_name) if v_dir else v_name
+        
+        # Check if file exists relative to v_dir
+        if v_dir and (Path(v_dir) / v_name).exists():
+            final_voice_prompt = str(Path(v_dir) / v_name)
+        elif v_path.exists():
+            final_voice_prompt = str(v_path)
+        else:
+            # Last resort: try just the name and let moshi handle it
+            final_voice_prompt = v_name
 
         with self._lock:
             self.lm_gen = LMGen(
@@ -259,12 +264,15 @@ class PersonaPlexManager:
         v_path = Path(voice_prompt_path)
         v_name = v_path.name
         v_dir = PERSONAPLEX_VOICE_PROMPT_DIR.strip()
-        if not v_dir:
-            v_parent = str(v_path.parent)
-            if v_parent not in {"", "."}:
-                v_dir = v_parent
         
-        final_voice_prompt = str(Path(v_dir) / v_name) if v_dir else v_name
+        # Check if file exists relative to v_dir
+        if v_dir and (Path(v_dir) / v_name).exists():
+            final_voice_prompt = str(Path(v_dir) / v_name)
+        elif v_path.exists():
+            final_voice_prompt = str(v_path)
+        else:
+            final_voice_prompt = v_name
+            
         logger.debug("PersonaPlexManager: using voice prompt path: %s", final_voice_prompt)
 
         with self._lock:
@@ -621,11 +629,15 @@ async def run_personaplex_offline(
     voice_name = voice_path.name
     resolved_voice_dir = voice_prompt_dir.strip() if isinstance(voice_prompt_dir, str) else ""
     if not resolved_voice_dir:
-        parent = str(voice_path.parent)
-        # If only a basename is provided (e.g. NATF2.pt), let moshi.offline
-        # resolve/download voices instead of forcing current directory.
-        if parent not in {"", "."}:
-            resolved_voice_dir = parent
+        resolved_voice_dir = PERSONAPLEX_VOICE_PROMPT_DIR.strip()
+
+    # Final check for absolute path vs relative to dir
+    if resolved_voice_dir and (Path(resolved_voice_dir) / voice_name).exists():
+        final_voice_path_str = str(Path(resolved_voice_dir) / voice_name)
+    elif voice_path.exists():
+        final_voice_path_str = str(voice_path)
+    else:
+        final_voice_path_str = voice_name
 
     command = [
         _resolve_personaplex_python(),
@@ -638,7 +650,7 @@ async def run_personaplex_offline(
         "--output-text",
         output_text,
         "--voice-prompt",
-        voice_name,
+        final_voice_path_str,
         "--text-prompt",
         text_prompt,
         "--seed",
@@ -646,8 +658,6 @@ async def run_personaplex_offline(
         "--device",
         device,
     ]
-    if resolved_voice_dir:
-        command.extend(["--voice-prompt-dir", resolved_voice_dir])
     if cpu_offload:
         command.append("--cpu-offload")
 

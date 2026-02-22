@@ -108,8 +108,10 @@ def _show_startup_status(stdscr, lines):
             print(line, flush=True)
         return
     stdscr.clear()
-    _, max_x = stdscr.getmaxyx()
+    max_y, max_x = stdscr.getmaxyx()
     for idx, line in enumerate(lines):
+        if idx >= max_y - 1:
+            break
         stdscr.addstr(idx, 0, line[: max_x - 1])
         stdscr.clrtoeol()
     stdscr.refresh()
@@ -150,19 +152,18 @@ async def main(stdscr=None, renderer_name="auto", renderer_reason="", dev_mode=F
     startup_lines = [
         "Agent-Bot: interactive autonomous assistant with voice and scheduled tasks.",
         f"Renderer: {renderer_name}" + (f" ({renderer_reason})" if renderer_reason else ""),
-        "Loading model... please wait.",
+        "Initializing systems...",
     ]
-    startup_stage = {"detail": "Preparing model runtime..."}
     if dev_mode:
         startup_lines.append("Development mode: autonomous background tasks disabled.")
     log_warning = _interaction_log_health_message()
     if log_warning:
         startup_lines.append(log_warning)
-    _show_startup_status(stdscr, startup_lines + [startup_stage["detail"]])
+    _show_startup_status(stdscr, startup_lines)
 
     def _status_callback(message: str):
-        startup_stage["detail"] = f"Stage: {message}"
-        _show_startup_status(stdscr, startup_lines + [startup_stage["detail"]])
+        startup_lines.append(f"Stage: {message}")
+        _show_startup_status(stdscr, startup_lines)
 
     index_manager = IndexManager()
     interaction_log_manager = InteractionLogManager()

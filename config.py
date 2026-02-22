@@ -43,7 +43,7 @@ PERSONAPLEX_TEXT_PROMPT = (
     "the recent past, use 'inspect_audio_snippet'. If you need to see what is on "
     "the screen, use 'inspect_current_screen'. Answer in a clear and engaging way."
 )
-PERSONAPLEX_VOICE_PROMPT_DIR = ""
+PERSONAPLEX_VOICE_PROMPT_DIR = "personaplex"
 PERSONAPLEX_DEVICE = "cuda"
 PERSONAPLEX_CPU_OFFLOAD = True
 PERSONAPLEX_USE_CUDA_GRAPHS = False
