@@ -177,16 +177,49 @@ class LlamaModelManager:
         repo_id = spec.get("repo_id")
         if not repo_id:
             raise RuntimeError("transformers model spec must define repo_id.")
+        
+        import time
+        start_total = time.perf_counter()
+        
+        def get_vram():
+            if torch is not None and torch.cuda.is_available():
+                return torch.cuda.memory_allocated() / (1024**3)
+            return 0.0
+
+        vram_before = get_vram()
         self.logger.info("Loading transformers model from HF cache: repo=%s", repo_id)
+        
+        # 1) Tokenizer
+        start = time.perf_counter()
         self._status(f"Loading tokenizer: {repo_id}")
         self.hf_tokenizer = AutoTokenizer.from_pretrained(repo_id, trust_remote_code=True)
+        dur = time.perf_counter() - start
+        vram_now = get_vram()
+        self._status(f"Tokenizer loaded in {dur:.1f}s (VRAM: {vram_now:.2f}GB, +{vram_now-vram_before:.2f}GB)")
+        vram_before = vram_now
+
+        # 2) Processor
         if AutoProcessor is not None:
+            start = time.perf_counter()
             self._status(f"Loading processor: {repo_id}")
             self.hf_processor = AutoProcessor.from_pretrained(repo_id, trust_remote_code=True)
+            dur = time.perf_counter() - start
+            vram_now = get_vram()
+            self._status(f"Processor loaded in {dur:.1f}s (VRAM: {vram_now:.2f}GB, +{vram_now-vram_before:.2f}GB)")
+            vram_before = vram_now
+
+        # 3) Config
         config = None
         if AutoConfig is not None:
+            start = time.perf_counter()
             self._status(f"Loading model config: {repo_id}")
             config = AutoConfig.from_pretrained(repo_id, trust_remote_code=True)
+            dur = time.perf_counter() - start
+            vram_now = get_vram()
+            self._status(f"Config loaded in {dur:.1f}s (VRAM: {vram_now:.2f}GB, +{vram_now-vram_before:.2f}GB)")
+            vram_before = vram_now
+
+        # 4) Weights
         os.makedirs(MODEL_TRANSFORMERS_OFFLOAD_DIR, exist_ok=True)
         self._status(f"Loading transformer weights: {repo_id} (first run may take a while)")
         
@@ -198,8 +231,9 @@ class LlamaModelManager:
                 bnb_4bit_quant_type="nf4",
                 bnb_4bit_use_double_quant=True,
             )
-            self._status("Using 4-bit quantization (bitsandbytes)")
+            self._status("Configuring 4-bit quantization (bitsandbytes)")
 
+        start = time.perf_counter()
         self.hf_model = AutoModelForCausalLM.from_pretrained(
             repo_id,
             config=config,
@@ -211,9 +245,14 @@ class LlamaModelManager:
             low_cpu_mem_usage=True,
             trust_remote_code=True,
         )
+        dur = time.perf_counter() - start
+        vram_now = get_vram()
+        self._status(f"Weights loaded in {dur:.1f}s (VRAM: {vram_now:.2f}GB, +{vram_now-vram_before:.2f}GB)")
+        
         self.llm = None
         self.backend = "transformers"
-        self.logger.info("Active model set: alias=%s backend=%s", spec["alias"], self.backend)
+        total_dur = time.perf_counter() - start_total
+        self.logger.info("Active model set: alias=%s backend=%s total_load_time=%.1fs", spec["alias"], self.backend, total_dur)
 
     def load_model(self, alias: Optional[str] = None) -> Dict[str, Any]:
         target_alias = self._resolve_alias(alias)
@@ -347,6 +386,7 @@ class LlamaModelManager:
                 if target_device is not None and "cuda" in str(target_device):
                     model_inputs = {k: v.to(dtype=torch.bfloat16) if torch.is_floating_point(v) else v 
                                    for k, v in model_inputs.items()}
+                    torch.cuda.empty_cache()
 
                 output_ids = self.hf_model.generate(
                     **model_inputs,

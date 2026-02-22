@@ -22,6 +22,7 @@ from config import (
     PERSONAPLEX_SERVER_LOG_PATH,
     PERSONAPLEX_CPU_OFFLOAD,
     PERSONAPLEX_DEVICE,
+    PERSONAPLEX_USE_CUDA_GRAPHS,
     PERSONAPLEX_OFFLINE_TIMEOUT_SECONDS,
     PERSONAPLEX_PYTHON_BIN,
     PERSONAPLEX_TEXT_PROMPT,
@@ -99,7 +100,9 @@ class PersonaPlexStreamingSession:
             self.lm_gen.streaming_forever(1)
             self.frame_size = int(self.manager.mimi.sample_rate / self.manager.mimi.frame_rate)
             
-            warmup(self.manager.mimi, self.manager.other_mimi, self.lm_gen, self.manager.device, self.frame_size)
+            if PERSONAPLEX_USE_CUDA_GRAPHS:
+                self.manager._status("PersonaPlexManager: warming up CUDA graphs...")
+                warmup(self.manager.mimi, self.manager.other_mimi, self.lm_gen, self.manager.device, self.frame_size)
             
             if final_voice_prompt.endswith('.pt'):
                 self.lm_gen.load_voice_prompt_embeddings(final_voice_prompt)
@@ -185,27 +188,47 @@ class PersonaPlexManager:
             logger.error("moshi package not available for in-process loading.")
             raise RuntimeError("moshi package not available for in-process loading.")
 
+        def get_vram():
+            if torch is not None and torch.cuda.is_available():
+                return torch.cuda.memory_allocated() / (1024**3)
+            return 0.0
+
+        vram_before = get_vram()
         self._status("PersonaPlexManager: starting in-process model load...")
         with self._lock:
             from huggingface_hub import hf_hub_download
             
             try:
                 # 1) Load Mimi
+                start = time.perf_counter()
                 self._status("PersonaPlexManager: loading mimi...")
                 mimi_weight = hf_hub_download(self.repo, loaders.MIMI_NAME)
                 self.mimi = loaders.get_mimi(mimi_weight, self.device)
                 self.other_mimi = loaders.get_mimi(mimi_weight, self.device)
+                dur = time.perf_counter() - start
+                vram_now = get_vram()
+                self._status(f"PersonaPlexManager: mimi loaded in {dur:.1f}s (VRAM: {vram_now:.2f}GB, +{vram_now-vram_before:.2f}GB)")
+                vram_before = vram_now
                 
                 # 2) Load tokenizer
+                start = time.perf_counter()
                 self._status("PersonaPlexManager: loading tokenizer...")
                 tokenizer_path = hf_hub_download(self.repo, loaders.TEXT_TOKENIZER_NAME)
                 self.text_tokenizer = sentencepiece.SentencePieceProcessor(tokenizer_path)
+                dur = time.perf_counter() - start
+                vram_now = get_vram()
+                self._status(f"PersonaPlexManager: tokenizer loaded in {dur:.1f}s (VRAM: {vram_now:.2f}GB, +{vram_now-vram_before:.2f}GB)")
+                vram_before = vram_now
                 
                 # 3) Load Moshi LM
+                start = time.perf_counter()
                 self._status("PersonaPlexManager: loading moshi lm...")
                 moshi_weight = hf_hub_download(self.repo, loaders.MOSHI_NAME)
                 self.lm = loaders.get_moshi_lm(moshi_weight, device=self.device, cpu_offload=self.cpu_offload)
                 self.lm.eval()
+                dur = time.perf_counter() - start
+                vram_now = get_vram()
+                self._status(f"PersonaPlexManager: moshi loaded in {dur:.1f}s (VRAM: {vram_now:.2f}GB, +{vram_now-vram_before:.2f}GB)")
                 
                 # Streaming forever setup
                 self.mimi.streaming_forever(1)
@@ -262,7 +285,8 @@ class PersonaPlexManager:
             lm_gen.streaming_forever(1)
             
             frame_size = int(self.mimi.sample_rate / self.mimi.frame_rate)
-            warmup(self.mimi, self.other_mimi, lm_gen, self.device, frame_size)
+            if PERSONAPLEX_USE_CUDA_GRAPHS:
+                warmup(self.mimi, self.other_mimi, lm_gen, self.device, frame_size)
             
             # Load prompts
             if final_voice_prompt.endswith('.pt'):
