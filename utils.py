@@ -69,15 +69,20 @@ def _ensure_voice_prompt_exists(voice_name: str, repo_id: str = "nvidia/personap
     # Check common local locations
     project_root = Path(__file__).parent.absolute()
     v_dir = PERSONAPLEX_VOICE_PROMPT_DIR.strip()
-    candidates = [
-        Path(voice_name),
-        Path(v_dir) / voice_name if v_dir else None,
-        project_root / "voices" / voice_name,
-        project_root / "personaplex" / voice_name,
-    ]
-    for cand in [c for c in candidates if c]:
-        if cand.exists():
-            return str(cand)
+    
+    local_search_dirs = [Path("."), project_root / "voices", project_root / "personaplex"]
+    if v_dir:
+        local_search_dirs.append(Path(v_dir))
+        
+    for search_dir in local_search_dirs:
+        if not search_dir.exists():
+            continue
+        # Recursive search for the filename
+        for root, _, files in os.walk(search_dir):
+            if voice_name in files:
+                found_path = str(Path(root) / voice_name)
+                logger.debug("Found voice prompt locally at: %s", found_path)
+                return found_path
 
     # Not found locally, attempt HF download
     logger.info("Voice prompt '%s' not found locally. Attempting HF download...", voice_name)
@@ -260,8 +265,11 @@ class PersonaPlexManager:
         try:
             import moshi.models.lm
             original_init = moshi.models.lm.CUDAGraphed.__init__
-            def patched_init(self, func, warmup_steps=1, disable_orig=False):
+            def patched_init(self, func, warmup_steps=1, disable_orig=False, **kwargs):
                 # We ignore the model's 'disable' hint and use our global one
+                # Note: We must support 'disable' as a keyword if it's passed that way
+                target_disable = kwargs.get('disable', disable_orig)
+                # But we override it with our global preference
                 original_init(self, func, warmup_steps=warmup_steps, disable=disable)
             moshi.models.lm.CUDAGraphed.__init__ = patched_init
             logger.info("PersonaPlexManager: patched moshi CUDAGraphed (disable=%s)", disable)
