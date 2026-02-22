@@ -198,15 +198,6 @@ async def main(stdscr=None, renderer_name="auto", renderer_reason="", dev_mode=F
     # Explicitly load PersonaPlex models during startup to show progress
     await asyncio.to_thread(personaplex_manager.load)
 
-    _show_startup_status(
-        stdscr,
-        [
-            "Agent-Bot: interactive autonomous assistant with voice and scheduled tasks.",
-            f"Renderer: {renderer_name}" + (f" ({renderer_reason})" if renderer_reason else ""),
-            "Model loaded. Starting UI...",
-        ],
-    )
-
     event_scheduler = EventScheduler(
         state, interaction_log_manager, index_manager, runtime_manager=runtime_manager
     )

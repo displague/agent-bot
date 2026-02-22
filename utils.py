@@ -70,6 +70,7 @@ def _ensure_voice_prompt_exists(voice_name: str, repo_id: str = "nvidia/personap
     candidates = [
         Path(voice_name),
         Path(v_dir) / voice_name if v_dir else None,
+        Path("voices") / voice_name,
         Path("personaplex") / voice_name,
     ]
     for cand in [c for c in candidates if c]:
@@ -89,7 +90,7 @@ def _ensure_voice_prompt_exists(voice_name: str, repo_id: str = "nvidia/personap
         if "voices.tgz" in files:
             logger.info("Prompt not found as standalone. Downloading and extracting voices.tgz...")
             tgz_path = hf_hub_download(repo_id=repo_id, filename="voices.tgz")
-            extract_dir = Path(tempfile.gettempdir()) / "personaplex_voices"
+            extract_dir = Path("voices")
             extract_dir.mkdir(parents=True, exist_ok=True)
             with tarfile.open(tgz_path, "r:gz") as tar:
                 tar.extractall(path=extract_dir)

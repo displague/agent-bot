@@ -8,4 +8,6 @@ logs/
 compressed_logs/
 index/
 hf_offload/
+offload_weights/
+voices/
 model.bin

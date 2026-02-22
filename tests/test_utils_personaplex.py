@@ -34,7 +34,7 @@ async def test_run_personaplex_offline_returns_generated_text(monkeypatch, tmp_p
 
     # Patch the in-process path which is tried first
     with patch('utils.moshi_run_inference', new=mock_moshi_run_inference), \
-         patch('utils._ensure_voice_prompt_exists', return_value="C:/voices/NATF2.pt"):
+         patch('utils._ensure_voice_prompt_exists', return_value="voices/NATF2.pt"):
         
         async def mock_to_thread(func, *args, **kwargs):
             return await func(*args, **kwargs)
@@ -44,8 +44,8 @@ async def test_run_personaplex_offline_returns_generated_text(monkeypatch, tmp_p
                 str(input_wav),
                 str(output_wav),
                 output_text=str(output_text),
-                voice_prompt="C:/voices/NATF2.pt",
-                voice_prompt_dir="C:/voices",
+                voice_prompt="voices/NATF2.pt",
+                voice_prompt_dir="voices",
                 text_prompt="You enjoy having a good conversation.",
             )
 
