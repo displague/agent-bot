@@ -67,9 +67,21 @@ class EventCompressor:
 
             events_text = ""
             for entry in logs:
-                input_text = entry.get("input", "")
-                output_text = entry.get("output", "")
-                events_text += f"Task: {input_text}\nThought: {output_text}\n"
+                event_str = entry.get("event", "")
+                if not event_str:
+                    # Fallback for old schema
+                    input_text = entry.get("input", "")
+                    output_text = entry.get("output", "")
+                    if input_text or output_text:
+                        events_text += f"Task: {input_text}\nThought: {output_text}\n"
+                    continue
+
+                if event_str.startswith("Input: "):
+                    events_text += f"Task: {event_str[len('Input: '):]}\n"
+                elif event_str.startswith("Thought: "):
+                    events_text += f"Thought: {event_str[len('Thought: '):]}\n"
+                elif event_str.startswith("Voice model"):
+                    events_text += f"Voice: {event_str}\n"
 
             if not events_text.strip():
                 self.logger.debug("No events to compress.")

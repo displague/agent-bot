@@ -166,7 +166,7 @@ async def main(stdscr=None, renderer_name="auto", renderer_reason="", dev_mode=F
 
     index_manager = IndexManager()
     interaction_log_manager = InteractionLogManager()
-    personaplex_manager = PersonaPlexManager()
+    personaplex_manager = PersonaPlexManager(status_callback=_status_callback)
     voice_loop = VoiceLoop(state, interaction_log_manager, personaplex_manager=personaplex_manager)
 
     llama_manager = LlamaModelManager(
@@ -175,6 +175,9 @@ async def main(stdscr=None, renderer_name="auto", renderer_reason="", dev_mode=F
         status_callback=_status_callback,
         voice_loop=voice_loop,
     )
+
+    # Explicitly load PersonaPlex models during startup to show progress
+    await asyncio.to_thread(personaplex_manager.load)
 
     _show_startup_status(
         stdscr,

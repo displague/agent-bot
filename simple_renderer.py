@@ -114,7 +114,7 @@ class SimpleRenderer:
         if cmd == "/help":
             print(
                 "Commands: /help, /model, /llm-status, /llm-diagnose, /smoke, /smoke-model, /smoke-all, "
-                "/voice-start, /voice-stop, /voice-status, /voice-diagnose, /quit, /force-quit"
+                "/voice-start, /voice-stop, /voice-status, /voice-diagnose, /wake, /sleep, /quit, /force-quit"
             )
             print("Ctrl+D (EOF) also exits in simple mode.")
             print(f"Voice hotkey is available in curses mode via {VOICE_CAPTURE_KEY_LABEL}.")

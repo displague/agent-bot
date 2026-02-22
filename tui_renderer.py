@@ -442,9 +442,9 @@ class TUIRenderer:
             await self.interaction_log_manager.append(
                 (
                     "Commands: /help, /model, /llm-status, /llm-diagnose, /smoke, /smoke-model, /smoke-all, "
-                    "/voice-start, /voice-stop, /voice-status, /voice-diagnose, /quit, /force-quit. "
+                    "/voice-start, /voice-stop, /voice-status, /voice-diagnose, /wake, /sleep, /quit, /force-quit. "
                     f"Voice start hotkey: {VOICE_CAPTURE_KEY_LABEL}. "
-                    "Keys: Esc=toggle debug, Up/Down=scroll, Tab=autocomplete, Backspace=edit, Ctrl+D=quit."
+                    "Keys: Esc=toggle debug, Up/Down=history, PgUp/PgDn=scroll, Tab=autocomplete, Backspace=edit, Ctrl+D=quit."
                 )
             )
             self.show_footer_message("Command help added to log.")

@@ -8,7 +8,7 @@ import tempfile
 import time
 import threading
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Callable
 
 import numpy as np
 import soundfile as sf
@@ -51,15 +51,24 @@ logger = logging.getLogger("autonomous_system.utils")
 class PersonaPlexManager:
     """Manages persistent in-process PersonaPlex models for fast inference."""
     
-    def __init__(self, device: str = PERSONAPLEX_DEVICE, cpu_offload: bool = PERSONAPLEX_CPU_OFFLOAD):
+    def __init__(self, device: str = PERSONAPLEX_DEVICE, cpu_offload: bool = PERSONAPLEX_CPU_OFFLOAD, status_callback: Optional[Callable[[str], None]] = None):
         self.device = device
         self.cpu_offload = cpu_offload
+        self.status_callback = status_callback
         self.mimi = None
         self.other_mimi = None
         self.lm = None
         self.text_tokenizer = None
         self.repo = "nvidia/personaplex-7b-v1"
         self._lock = threading.Lock()
+
+    def _status(self, message: str):
+        logger.info(message)
+        if self.status_callback:
+            try:
+                self.status_callback(message)
+            except Exception:
+                pass
 
     def load(self):
         """Load models into VRAM if not already loaded."""
@@ -70,24 +79,24 @@ class PersonaPlexManager:
             logger.error("moshi package not available for in-process loading.")
             raise RuntimeError("moshi package not available for in-process loading.")
 
-        logger.info("PersonaPlexManager: starting in-process model load...")
+        self._status("PersonaPlexManager: starting in-process model load...")
         with self._lock:
             from huggingface_hub import hf_hub_download
             
             try:
                 # 1) Load Mimi
-                logger.info("PersonaPlexManager: loading mimi...")
+                self._status("PersonaPlexManager: loading mimi...")
                 mimi_weight = hf_hub_download(self.repo, loaders.MIMI_NAME)
                 self.mimi = loaders.get_mimi(mimi_weight, self.device)
                 self.other_mimi = loaders.get_mimi(mimi_weight, self.device)
                 
                 # 2) Load tokenizer
-                logger.info("PersonaPlexManager: loading tokenizer...")
+                self._status("PersonaPlexManager: loading tokenizer...")
                 tokenizer_path = hf_hub_download(self.repo, loaders.TEXT_TOKENIZER_NAME)
                 self.text_tokenizer = sentencepiece.SentencePieceProcessor(tokenizer_path)
                 
                 # 3) Load Moshi LM
-                logger.info("PersonaPlexManager: loading moshi lm...")
+                self._status("PersonaPlexManager: loading moshi lm...")
                 moshi_weight = hf_hub_download(self.repo, loaders.MOSHI_NAME)
                 self.lm = loaders.get_moshi_lm(moshi_weight, device=self.device, cpu_offload=self.cpu_offload)
                 self.lm.eval()
@@ -95,7 +104,7 @@ class PersonaPlexManager:
                 # Streaming forever setup
                 self.mimi.streaming_forever(1)
                 self.other_mimi.streaming_forever(1)
-                logger.info("PersonaPlexManager: models loaded and ready.")
+                self._status("PersonaPlexManager: models loaded and ready.")
             except Exception as e:
                 logger.exception("PersonaPlexManager: failed to load models: %s", e)
                 raise

@@ -163,15 +163,7 @@ class InteractionProcessor:
                         self.logger.error(f"Failed to speak final response: {e}")
 
                     await self.interaction_log_manager.append(f"Thought: {response}")
-                    log_entry = {
-                        "timestamp": datetime.now().isoformat(),
-                        "input": user_input,
-                        "output": response,
-                    }
-                    with open(INTERACTION_LOG_PATH, "a", encoding="utf-8") as log_file:
-                        log_file.write(json.dumps(log_entry) + "\n")
-
-                    self.index_manager.index_interaction(log_entry)
+                    self.index_manager.index_interaction({"input": user_input, "output": response})
                     self.state["last_processing_status"] = "ok"
                     self.state["last_processing_error"] = ""
                     self.state["unprocessed_interactions"] = max(
