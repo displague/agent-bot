@@ -21,11 +21,22 @@ Use this skill when the app shows voice loop running but user sees no response o
 
 ## Common Pitfalls & Lessons
 
-- **Thread-Safe Queue Updates**: Microphone capture runs in a background thread. Always use `loop.call_soon_threadsafe(q.put_nowait, chunk)` to avoid corrupting the async state of subscriber queues.
-- **Contiguous Arrays**: Slicing numpy arrays often creates non-contiguous views. Use `np.ascontiguousarray(chunk)` before calling `torch.from_numpy()` to prevent `ValueError` or `AssertionError` during inference.
-- **Role Alternation**: Gemma-3n strictly requires alternating `user`/`assistant` roles. If the log schema is unified, ensure consecutive entries from the same role are merged before templating.
+- **Thread-Safe Queue Updates**: Microphone capture runs in a background thread. Always use `loop.call_soon_threadsafe(queue.put_nowait, chunk)` to avoid corrupting the async state.
+- **Contiguous Arrays**: Slicing numpy arrays often creates non-contiguous views. Use `np.ascontiguousarray(chunk)` before calling `torch.from_numpy()` to prevent `ValueError`.
+- **Role Alternation**: Gemma-3n strictly requires alternating `user`/`assistant` roles. Merge consecutive entries from the same role.
+- **Warm Generator**: Always use the persistent `self.lm_gen` in `PersonaPlexManager` to avoid the 30s re-instantiation delay.
+- **VAD Muting**: Feeding silence (`np.zeros`) to Moshi when the user isn't speaking prevents background noise from poisoning the KV cache.
 
 ## Triage Flow
+
+1. **Verify Hardware**: Run `/voice-test-tone`.
+   - *Hear a beep?* Output driver is OK.
+   - *No beep?* Run `/voice-devices` and check routing. Use `/voice-set-device out <id>`.
+2. **Verify Generation**: Check `logs/app.log` for `saved generated audio to ...`.
+   - *File exists?* Inference is working.
+   - *No file?* Check for `IndexError` (Streaming propagation bug) or OOM.
+3. **Verify Hot-Socket**: Connect to port 9999 and run `{"type": "state"}` to check `is_processing` and `voice_activity_state`.
+4. **Iterate**: Update logic and run `/logic-reload` via the socket or TUI.
 
 1. If voice loop is `running` but no transcription appears:
    - Check `AudioMultiplexer` log for "starting capture thread".

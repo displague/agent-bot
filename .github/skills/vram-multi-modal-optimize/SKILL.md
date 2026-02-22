@@ -13,9 +13,9 @@ Use this skill when the app crashes with `CUDA error: out of memory` or `Offset 
    - Ensure `BitsAndBytesConfig` is utilized in `llama_model_manager.py`.
    - Verify `load_in_4bit=True` is active for the `transformers` backend.
 
-2. **CPU Offloading**:
-   - Enable `PERSONAPLEX_CPU_OFFLOAD = True` in `config.py`.
-   - This moves PersonaPlex layers to CPU, freeing critical VRAM for the primary LLM.
+2. **Warm Generator Pattern**:
+   - Reuse the `self.lm_gen` instance in `PersonaPlexManager` to avoid frequent OOMs during re-allocation.
+   - Use `reset_streaming()` to clear the KV cache between turns.
 
 3. **Memory Cleanup**:
    - Use `torch.cuda.empty_cache()` before starting heavy generation phases.
@@ -23,13 +23,12 @@ Use this skill when the app crashes with `CUDA error: out of memory` or `Offset 
 
 ## Graph Capture Stability
 
-1. **Disable CUDA Graphs**:
-   - Set `PERSONAPLEX_USE_CUDA_GRAPHS = False` if encountering `Offset increment` errors.
-   - Graphs improve speed but can be brittle on Windows or with dynamic input shapes.
+1. **Prefer Eager Mode**:
+   - Set `PERSONAPLEX_OPTIMIZE = "eager"` if encountering `AssertionError` or `IndexError`.
+   - Eager mode is currently the most stable path for Windows + Moshi.
 
-2. **Serialization**:
-   - Always use the `_processing_lock` in `InteractionProcessor` and `ThoughtGenerator`.
-   - Concurrent model calls are the leading cause of graph capture failures.
+2. **Idempotent Patching**:
+   - Always check `_is_patched` before applying monkeypatches to avoid recursion.
 
 ## Diagnostics
 

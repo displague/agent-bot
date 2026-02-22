@@ -49,6 +49,7 @@ This document outlines the roles, tools, protocols, and guidelines for AI agents
 - **env-cuda-alignment** (`.github/skills/env-cuda-alignment/SKILL.md`): Verify bfloat16 compatibility and `moshi` package visibility.
 - **multi-modal-diagnose**: Verify `AutoProcessor` state and audio-tool feedback loops.
 - **vram-multi-modal-optimize**: Strategies for managing memory and graph capture stability.
+- **debug-link**: Instructions for connecting to the Port 9999 hot socket.
 
 ### **Phase 6: Audio Multiplexer (Clean Stream Broadcast)**
 *   **Goal:** Decouple the microphone stream from the `VoiceLoop` logic.
@@ -68,6 +69,22 @@ This document outlines the roles, tools, protocols, and guidelines for AI agents
     2.  Added `inspect_current_screen` tool in `LlamaModelManager`.
     3.  Enabled multi-modal visual analysis in `llm_call`.
     4.  Updated system prompt to include visual sensory instructions.
+
+### **Phase 11: Performance & Flow Overhaul (The Hub Update)**
+*   **Goal:** Eliminate speech latency and enable rapid iteration.
+*   **Status:** COMPLETED
+*   **Action:**
+    1.  Implemented `Warm Generator` architecture (persistent `LMGen`).
+    2.  Shifted to `Streaming Playback` (chunks spoke as generated).
+    3.  Created `Real-time Experimentation Hub` (Port 9999 socket).
+    4.  Implemented `Deep Hot-Reload` (`/logic-reload` swaps code without weight reloads).
+    5.  Resolved Moshi `IndexError` and `AssertionError` via monkeypatches.
+
+### **Phase 12: Memory & Resource Orchestration**
+*   **Goal:** Manage the 23GB+ VRAM footprint of having both models loaded.
+*   **Action:**
+    1.  Implement a "sleep mode" for Gemma where its weights are offloaded to CPU/Disk when inactive.
+    2.  Add a background task that monitors `torch.cuda.memory_reserved()` and triggers `empty_cache()`.
 
 ### **Phase 10: Audio Output Transformation (DSP Path)**
 *   **Goal:** Allow the agent to transform its own spoken voice via tools.
