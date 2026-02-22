@@ -6,14 +6,15 @@ An autonomous AI agent system that interacts via text or voice, processes intera
 
 - **Bidirectional Audio Interaction**: Uses NVIDIA PersonaPlex for real-time, full-duplex speech-to-speech conversations with persona control and voice conditioning.
 - **Auditory Memory**: 10-second rolling audio buffer powered by a shared `AudioMultiplexer`, allowing the agent to "hear" and analyze environmental context.
-- **Multi-Modal Reasoning**: Powered by `google/gemma-3n-E2B-it`, supporting native text and audio analysis.
+- **Visual Sensory Memory**: Native screen capture using `mss`, allowing the agent to "see" and reason about visual context.
+- **Multi-Modal Reasoning**: Powered by `google/gemma-3n-E2B-it`, supporting native text, audio, and vision analysis with 4-bit quantization.
+- **Real-Time Telemetry**: VRAM impact and duration tracking for all model loading stages, providing clear visibility into resource usage during startup.
 - **Cognitive Handoff**: Immediate reflexive "verbal fillers" via PersonaPlex while the LLM performs deep reasoning in the background.
 - **Multi-Phase Reasoning**: Breaks down tasks into planning, execution, digestion, validation, and response phases with real-time UI visibility.
 - **Model Switching**: Runtime `/model` command to inspect and switch between configured model backends (default is `gemma-it`).
 - **Autonomous Operation**: Generates periodic "thoughts" during active hours, compresses interaction logs hourly, and schedules events like reminders or training.
-- **Logging and Indexing**: Maintains hard logs (JSONL), compressed summaries, and a keyword-based index for context retrieval.
+- **Logging and Indexing**: Unified interaction logging via `InteractionLogManager` for consistent schemas and accurate summarization.
 - **Enhanced TUI Interface**: Real-time curses interface with status, thoughts, and interaction history. Features input history (Up/Down), log scrolling (PgUp/PgDn), and cursor editing (Left/Right).
-- **Event Management**: Handles deferred topics, lookups, RAG completions, and training events with specific time-tracking.
 - **Robust Shutdown**: Graceful shutdown sequence with a 10-second hard-kill watchdog.
 
 ## Architecture
@@ -21,12 +22,12 @@ An autonomous AI agent system that interacts via text or voice, processes intera
 - `main.py`: Entry point; initializes the auditory backbone, model managers, and runs all components asynchronously.
 - `runtime_manager.py`: Manages shared executors and tracked async tasks for graceful shutdown.
 - `tui_renderer.py`: Manages the curses-based TUI; handles rendering, input history, cursor editing, and log scrolling.
-- `interaction_processor.py`: Orchestrates cognitive handoff between immediate fillers and multi-phase LLM reasoning.
+- `interaction_processor.py`: Orchestrates cognitive handoff between immediate fillers and multi-phase LLM reasoning with a shared processing lock.
 - `functional_agent.py`: Manages multi-phase processing and explicitly tracks conversation history (user/assistant roles).
-- `llama_model_manager.py`: Manages model backends, including Gemma-3n multi-modal support via `AutoProcessor` and bfloat16 precision.
-- `thought_generator.py`: Generates autonomous thoughts with manual wake/sleep override support.
+- `llama_model_manager.py`: Manages model backends, including Gemma-3n multi-modal support via `AutoProcessor`, bfloat16 precision, and 4-bit quantization.
+- `thought_generator.py`: Generates autonomous thoughts with manual wake/sleep override and synchronized model access.
 - `event_scheduler.py`: Tracks and triggers timed events, updating the "Next event" status in real-time.
-- `utils.py`: Contains core infrastructure: `AudioMultiplexer`, `RollingAudioBuffer`, and `PersonaPlexManager` (persistent VRAM models).
+- `utils.py`: Contains core infrastructure: `AudioMultiplexer`, `RollingAudioBuffer`, `PersonaPlexManager` (persistent VRAM models), and `PersonaPlexStreamingSession`.
 - `voice_loop.py`: Full-duplex streaming voice loop that processes audio chunks in real-time via the multiplexer.
 - `config.py`: Central configuration for paths, model catalog, timeouts, and verbal fillers.
 
@@ -34,10 +35,11 @@ An autonomous AI agent system that interacts via text or voice, processes intera
 
 ### Prerequisites
 
-- Python 3.8+
+- Python 3.10+
 - NVIDIA GPU (RTX 5080 recommended, 16GB+ VRAM)
+- CUDA 12.1+ (Tested with CUDA 13.0)
 - Opus audio codec: Install `libopus-dev` (Ubuntu/Debian) or equivalent.
-- Hugging Face account with access to [nvidia/personaplex-7b-v1](https://huggingface.co/nvidia/personaplex-7b-v1)
+- Hugging Face account with access to [nvidia/personaplex-7b-v1](https://huggingface.co/nvidia/personaplex-7b-v1) and [google/gemma-3n-E2B-it](https://huggingface.co/google/gemma-3n-E2B-it)
 
 ### Installation
 
@@ -52,16 +54,15 @@ An autonomous AI agent system that interacts via text or voice, processes intera
    uv venv .venv
    ```
 
-3. Install Python dependencies into `agent-bot/.venv`:
+3. Install Python dependencies from lockfile:
    ```bash
-   uv pip install --python .venv/Scripts/python.exe -r requirements.txt
+   uv pip install -r requirements.txt
    ```
 
 4. Install PersonaPlex:
    ```bash
    git clone https://github.com/NVIDIA/personaplex.git
-   # dependencies already include editable ./personaplex/moshi via requirements.txt
-   # For Blackwell GPUs, install CUDA-enabled torch in .venv as needed.
+   # The requirements.txt already includes the upstream dependency.
    ```
 
 5. Set up environment:

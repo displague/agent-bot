@@ -21,15 +21,17 @@ This document outlines the roles, tools, protocols, and guidelines for AI agents
 
 - **Communication**: Use role prefixes and reference the current processing phase (e.g., "[Reasoning Agent] Phase: Planning").
 - **Handoff Logic**: Priority 1: Trigger reflexive filler. Priority 2: Multi-phase background reasoning. Priority 3: Final spoken response.
-- **Context Management**: Explicitly alternate 'user' and 'assistant' roles in `llm_context` to comply with Gemma-3n constraints.
+- **Context Management**: Explicitly alternate 'user' and 'assistant' roles in `llm_context` to comply with Gemma-3n constraints. Merge consecutive entries from the same role.
+- **GPU Serialization**: Always acquire `_processing_lock` before making model calls (LLM or PersonaPlex) to prevent CUDA graph conflicts and VRAM spikes.
 - **State Tracking**: Monitor `manual_wake` status and "Next event" time-tracking for autonomous operations.
 
 ## Guidelines
 
 - **Code Quality**: Follow Python best practices; add docstrings and comments. Use async/await for concurrency.
 - **Security**: Protect HF_TOKEN and avoid logging sensitive data.
-- **Performance**: Monitor VRAM and offload behavior; `gpt-oss` may offload to disk (`hf_offload/`) and contend with voice inference on constrained memory.
-- **Testing**: Validate changes with unit tests (pytest); manual checks for audio/TUI.
+- **Multi-Modal Optimization**: Prefer 4-bit quantization (`BitsAndBytesConfig`) and CPU offloading for large models to manage VRAM effectively.
+- **Thread Safety**: Use `loop.call_soon_threadsafe` when broadcasting from background capture threads to async queues.
+- **Testing**: Validate changes with unit tests (pytest). Use the global mocking strategy in `tests/conftest.py` to avoid heavy model loads. To test real logic that is globally mocked, use `@pytest.mark.skip_heavy_mock`. Always set a timeout (e.g., `--timeout=30`) when running tests.
 - **Collaboration**: Propose changes via pull requests; review for integration impact.
 - **Documentation**: Update this file and README.md as features evolve.
 
@@ -46,6 +48,26 @@ This document outlines the roles, tools, protocols, and guidelines for AI agents
 - **shutdown-recovery** (`.github/skills/shutdown-recovery/SKILL.md`): Handle the 10s watchdog triggers and ensure the capture thread terminates.
 - **env-cuda-alignment** (`.github/skills/env-cuda-alignment/SKILL.md`): Verify bfloat16 compatibility and `moshi` package visibility.
 - **multi-modal-diagnose**: Verify `AutoProcessor` state and audio-tool feedback loops.
+- **vram-multi-modal-optimize**: Strategies for managing memory and graph capture stability.
+
+### **Phase 6: Audio Multiplexer (Clean Stream Broadcast)**
+*   **Goal:** Decouple the microphone stream from the `VoiceLoop` logic.
+*   **Status:** COMPLETED
+*   **Action:** Implemented `AudioMultiplexer` and `RollingAudioBuffer` for thread-safe, multi-subscriber audio capture.
+
+### **Phase 7: True Full-Duplex (Low-Latency Interjections)**
+*   **Goal:** Enable the agent to start responding or interject *while* the user is still speaking.
+*   **Status:** COMPLETED
+*   **Action:** Shifted to a streaming approach where `LMGen.step` is processed in real-time via `PersonaPlexStreamingSession`.
+
+### **Phase 8: Vision Integration (Multi-Modal Sensory)**
+*   **Goal:** Allow the agent to "see" its environment.
+*   **Status:** COMPLETED
+*   **Action:**
+    1.  Implemented `capture_screen` utility using `mss`.
+    2.  Added `inspect_current_screen` tool in `LlamaModelManager`.
+    3.  Enabled multi-modal visual analysis in `llm_call`.
+    4.  Updated system prompt to include visual sensory instructions.
 
 ### **Phase 10: Audio Output Transformation (DSP Path)**
 *   **Goal:** Allow the agent to transform its own spoken voice via tools.

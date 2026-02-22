@@ -1,18 +1,1 @@
-numpy
-soundfile
-sounddevice
-torch
-torchvision
-torchaudio
-transformers
-llama-cpp-python
-huggingface_hub
-python-dotenv
-aiohttp
-sentencepiece
-sphn
-accelerate
-pytest
-mss
-Pillow
-moshi @ git+https://github.com/NVIDIA/personaplex.git#subdirectory=moshi
+-r requirements.lock
