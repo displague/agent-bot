@@ -19,6 +19,12 @@ Use this skill when the app shows voice loop running but user sees no response o
    - llm `processing` flag and `processing_phase`
 3. Verify Esc debug view is populated with `phase` and `voice` state.
 
+## Common Pitfalls & Lessons
+
+- **Thread-Safe Queue Updates**: Microphone capture runs in a background thread. Always use `loop.call_soon_threadsafe(q.put_nowait, chunk)` to avoid corrupting the async state of subscriber queues.
+- **Contiguous Arrays**: Slicing numpy arrays often creates non-contiguous views. Use `np.ascontiguousarray(chunk)` before calling `torch.from_numpy()` to prevent `ValueError` or `AssertionError` during inference.
+- **Role Alternation**: Gemma-3n strictly requires alternating `user`/`assistant` roles. If the log schema is unified, ensure consecutive entries from the same role are merged before templating.
+
 ## Triage Flow
 
 1. If voice loop is `running` but no transcription appears:
