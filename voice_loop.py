@@ -237,8 +237,9 @@ class VoiceLoop:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                logger.error("Voice listen loop error: %s", exc)
-                await self._set_activity("error", f"listen error: {str(exc)[:80]}")
+                err_msg = str(exc) or type(exc).__name__
+                logger.error("Voice listen loop error: %s", err_msg)
+                await self._set_activity("error", f"listen error: {err_msg[:80]}")
                 await asyncio.sleep(0.2)
 
     async def _process_loop(self):

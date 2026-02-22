@@ -50,6 +50,45 @@ async def test_model_manager_tool_feedback_loop():
             assert result == "I hear silence."
 
 @pytest.mark.asyncio
+async def test_model_manager_vision_feedback_loop():
+    # Mock manager dependencies
+    manager = LlamaModelManager(model_path=None)
+    manager.backend = "llama_cpp"
+    manager.llm_executor = "mock_executor"
+    
+    # Mock tool that returns an Image
+    from PIL import Image
+    mock_image = Image.new('RGB', (100, 100))
+    manager.available_functions["inspect_current_screen"] = MagicMock(return_value=mock_image)
+    
+    # First call to llm_call returns the tool call JSON
+    # Second call returns the final text
+    with patch.object(manager, 'llm_call') as mock_llm_call:
+        mock_llm_call.side_effect = [
+            '{"name": "inspect_current_screen", "arguments": {}}',
+            "I see a desktop."
+        ]
+        
+        async def mock_run_in_executor(executor, func, *args, **kwargs):
+            return func(*args, **kwargs)
+
+        with patch('asyncio.get_running_loop') as mock_get_loop:
+            mock_loop = MagicMock()
+            mock_loop.run_in_executor = AsyncMock(side_effect=mock_run_in_executor)
+            mock_get_loop.return_value = mock_loop
+            
+            result = await manager.run_phase("Execution", "Look at screen", "Notes")
+            
+            # Verify tool was called
+            manager.available_functions["inspect_current_screen"].assert_called_once()
+            # Verify llm_call was re-invoked with image
+            assert mock_llm_call.call_count == 2
+            args, kwargs = mock_llm_call.call_args_list[1]
+            # image is the 4th positional arg: llm_call(prompt, max_tokens, audio, image)
+            assert args[3] is not None
+            assert result == "I see a desktop."
+
+@pytest.mark.asyncio
 async def test_conversation_alternation_logic():
     manager = LlamaModelManager(model_path=None)
     manager.llm_context = [

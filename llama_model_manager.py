@@ -6,6 +6,7 @@ import json
 import os
 import sys
 import math
+import numpy as np
 from threading import Lock
 import logging
 from typing import Any, Callable, Dict, Optional
@@ -31,11 +32,13 @@ except Exception:  # pragma: no cover - optional dependency at runtime
 
 try:
     from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer, AutoProcessor
+    import torch
 except Exception:  # pragma: no cover - optional dependency at runtime
     AutoConfig = None
     AutoModelForCausalLM = None
     AutoTokenizer = None
     AutoProcessor = None
+    torch = None
 
 logger = logging.getLogger("autonomous_system.llama_model_manager")
 
@@ -78,6 +81,7 @@ class LlamaModelManager:
             "search_index": self.fn_search_index,
             "schedule_event": self.fn_schedule_event,
             "inspect_audio_snippet": self.fn_inspect_audio_snippet,
+            "inspect_current_screen": self.fn_inspect_current_screen,
         }
         self._status_callback = status_callback
         self._status("Initializing model manager")
@@ -184,7 +188,6 @@ class LlamaModelManager:
             config = AutoConfig.from_pretrained(repo_id, trust_remote_code=True)
         os.makedirs(MODEL_TRANSFORMERS_OFFLOAD_DIR, exist_ok=True)
         self._status(f"Loading transformer weights: {repo_id} (first run may take a while)")
-        import torch
         self.hf_model = AutoModelForCausalLM.from_pretrained(
             repo_id,
             config=config,
@@ -246,7 +249,7 @@ class LlamaModelManager:
                 os.close(old_stderr)
                 sys.stderr = self.original_stderr
 
-    def llm_call(self, prompt, max_tokens=512, audio=None):
+    def llm_call(self, prompt, max_tokens=512, audio=None, image=None):
         """Calls the Llama model with the given prompt and optional multi-modal data."""
         with self.llm_lock, self.capture_llm_stderr():
             if _log_prompts_enabled():
@@ -307,13 +310,18 @@ class LlamaModelManager:
                 )
                 
                 # Use processor if multi-modal data is present
-                if audio is not None and self.hf_processor is not None:
-                    model_inputs = self.hf_processor(
-                        text=templated_prompt,
-                        audios=audio,
-                        sampling_rate=16000, # Common for Gemma audio, adjust if needed
-                        return_tensors="pt"
-                    )
+                if (audio is not None or image is not None) and self.hf_processor is not None:
+                    proc_kwargs = {
+                        "text": templated_prompt,
+                        "return_tensors": "pt"
+                    }
+                    if audio is not None:
+                        proc_kwargs["audios"] = audio
+                        proc_kwargs["sampling_rate"] = 16000
+                    if image is not None:
+                        proc_kwargs["images"] = image
+                        
+                    model_inputs = self.hf_processor(**proc_kwargs)
                 else:
                     encoded = self.hf_tokenizer(templated_prompt, return_tensors="pt")
                     model_inputs = dict(encoded)
@@ -335,7 +343,15 @@ class LlamaModelManager:
                     repetition_penalty=1.2,
                     pad_token_id=self.hf_tokenizer.eos_token_id,
                 )
-                new_tokens = output_ids[0][model_inputs["input_ids"].shape[-1] :]
+                
+                # Retrieve the correct length for slicing
+                input_len = 0
+                if "input_ids" in model_inputs:
+                    input_len = model_inputs["input_ids"].shape[-1]
+                elif "pixel_values" in model_inputs: # Vision-only fallback
+                    input_len = 0 # Usually image prompts replace or prepend differently
+                
+                new_tokens = output_ids[0][input_len:]
                 return self.hf_tokenizer.decode(new_tokens, skip_special_tokens=True)
             raise RuntimeError("No active model backend is loaded.")
 
@@ -446,6 +462,17 @@ Notes:"""
         features = extract_audio_features(audio)
         return f"Audio Snippet ({seconds}s) Features: {features}"
 
+    def fn_inspect_current_screen(self):
+        """Captures the current screen for visual analysis."""
+        from utils import capture_screen
+        try:
+            img = capture_screen()
+            self.logger.info("Screen captured successfully.")
+            return img
+        except Exception as e:
+            self.logger.error(f"Failed to capture screen: {e}")
+            return f"Error: Failed to capture screen: {e}"
+
     async def run_phase(self, phase_name, prompt, notes):
         """Runs a single phase by calling the LLM and handling function calls."""
         loop = asyncio.get_running_loop()
@@ -496,7 +523,16 @@ Otherwise, produce the {phase_name} text directly.
                     self.logger.info("Tool returned raw audio, re-invoking LLM with multi-modal context.")
                     follow_up_prompt = f"I have retrieved the audio you requested. What can you hear in this {len(function_result)/16000:.1f}s snippet?"
                     return await loop.run_in_executor(
-                        self.llm_executor, self.llm_call, follow_up_prompt, 512, function_result
+                        self.llm_executor, self.llm_call, follow_up_prompt, 512, function_result, None
+                    )
+                
+                # If tool returns image, re-invoke LLM
+                from PIL import Image as PILImage
+                if isinstance(function_result, PILImage.Image):
+                    self.logger.info("Tool returned image, re-invoking LLM with multi-modal context.")
+                    follow_up_prompt = "I have captured the screen as you requested. What can you see in this image?"
+                    return await loop.run_in_executor(
+                        self.llm_executor, self.llm_call, follow_up_prompt, 512, None, function_result
                     )
 
                 # Function calls are still part of internal state context for the next phase

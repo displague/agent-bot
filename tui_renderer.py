@@ -659,15 +659,18 @@ class TUIRenderer:
         py = _resolve_personaplex_python()
         lines.append(f"Voice diagnose: personaplex_python={py}")
         lines.append(f"Voice diagnose: python_exists={os.path.exists(py)}")
-        command = [
-            py,
-            "-c",
-            (
-                "import torch; import moshi; "
-                "print(f'torch={torch.__version__} moshi_available=True cuda_available={torch.cuda.is_available()} "
-                "cuda_version={getattr(torch.version, \"cuda\", None)}')"
-            ),
-        ]
+        
+        check_script = (
+            "import sys; "
+            "results = []; "
+            "try: import torch; results.append(f'torch={torch.__version__} cuda={torch.cuda.is_available()} cu_ver={getattr(torch.version, \"cuda\", \"N/A\")}'); "
+            "except ImportError: results.append('torch=MISSING'); "
+            "try: import moshi; results.append('moshi=OK'); "
+            "except ImportError: results.append('moshi=MISSING'); "
+            "print(' '.join(results))"
+        )
+        
+        command = [py, "-c", check_script]
         try:
             result = subprocess.run(
                 command,

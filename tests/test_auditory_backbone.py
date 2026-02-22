@@ -17,7 +17,8 @@ async def test_audio_multiplexer_broadcast():
     
     # Manually push a chunk into subscribers (bypassing the capture thread for unit test)
     with mux._lock:
-        for q in mux.subscribers:
+        for s in mux.subscribers:
+            q = s[0]
             q.put_nowait(mock_chunk)
             
     # Verify both queues received the chunk
@@ -29,7 +30,7 @@ async def test_audio_multiplexer_broadcast():
     
     mux.unsubscribe(q1)
     assert len(mux.subscribers) == 1
-    assert q2 in mux.subscribers
+    assert any(s[0] == q2 for s in mux.subscribers)
 
 @pytest.mark.asyncio
 async def test_rolling_audio_buffer():

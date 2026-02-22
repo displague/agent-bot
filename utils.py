@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 import os
@@ -7,11 +8,15 @@ import sys
 import tempfile
 import time
 import threading
+import collections
 from pathlib import Path
-from typing import Any, Dict, Optional, Callable, Set
+from typing import Any, Dict, Optional, Callable, Set, Tuple
 
 import numpy as np
 import soundfile as sf
+import torch
+from mss import mss
+from PIL import Image
 
 from config import (
     PERSONAPLEX_SERVER_LOG_PATH,
@@ -23,6 +28,7 @@ from config import (
     PERSONAPLEX_VOICE_PROMPT,
     PERSONAPLEX_VOICE_PROMPT_DIR,
     VOICE_SAMPLE_RATE,
+    VOICE_CHUNK_SECONDS,
 )
 
 try:
@@ -46,6 +52,98 @@ except ImportError:
     sentencepiece = None
 
 logger = logging.getLogger("autonomous_system.utils")
+
+
+class PersonaPlexStreamingSession:
+    """Manages an active, stateful streaming session with PersonaPlex models."""
+    
+    def __init__(self, manager, text_prompt: str, voice_prompt_path: str):
+        self.manager = manager
+        self.text_prompt = text_prompt
+        self.voice_prompt_path = voice_prompt_path
+        self.lm_gen = None
+        self.frame_size = 0
+        self._lock = threading.Lock()
+        self.all_text_tokens = []
+        self._is_ready = False
+
+    def start(self):
+        """Initialize the session: load models, run warmup, and step system prompts."""
+        from moshi.offline import warmup, wrap_with_system_tags
+        self.manager.load()
+        
+        # Resolve voice prompt path
+        v_path = Path(self.voice_prompt_path)
+        v_name = v_path.name
+        v_dir = PERSONAPLEX_VOICE_PROMPT_DIR.strip()
+        if not v_dir:
+            v_parent = str(v_path.parent)
+            if v_parent not in {"", "."}:
+                v_dir = v_parent
+        final_voice_prompt = str(Path(v_dir) / v_name) if v_dir else v_name
+
+        with self._lock:
+            self.lm_gen = LMGen(
+                self.manager.lm,
+                audio_silence_frame_cnt=int(0.5 * self.manager.mimi.frame_rate),
+                sample_rate=self.manager.mimi.sample_rate,
+                device=self.manager.device,
+                frame_rate=self.manager.mimi.frame_rate,
+                save_voice_prompt_embeddings=False,
+                use_sampling=True,
+                temp=0.8,
+                temp_text=0.7,
+                top_k=1,
+                top_k_text=1,
+            )
+            self.lm_gen.streaming_forever(1)
+            self.frame_size = int(self.manager.mimi.sample_rate / self.manager.mimi.frame_rate)
+            
+            warmup(self.manager.mimi, self.manager.other_mimi, self.lm_gen, self.manager.device, self.frame_size)
+            
+            if final_voice_prompt.endswith('.pt'):
+                self.lm_gen.load_voice_prompt_embeddings(final_voice_prompt)
+            else:
+                self.lm_gen.load_voice_prompt(final_voice_prompt)
+            
+            self.lm_gen.text_prompt_tokens = self.manager.text_tokenizer.encode(wrap_with_system_tags(self.text_prompt))
+            
+            self.manager.mimi.reset_streaming()
+            self.manager.other_mimi.reset_streaming()
+            self.lm_gen.reset_streaming()
+            self.lm_gen.step_system_prompts(self.manager.mimi)
+            self._is_ready = True
+
+    def step(self, audio_chunk: np.ndarray) -> Tuple[Optional[np.ndarray], Optional[str]]:
+        """Process a single audio chunk and return generated audio and text (if any).."""
+        if not self._is_ready:
+            self.start()
+            
+        with self._lock:
+            # Prepare input chunk
+            if len(audio_chunk) < self.frame_size:
+                audio_chunk = np.pad(audio_chunk, (0, self.frame_size - len(audio_chunk)))
+            elif len(audio_chunk) > self.frame_size:
+                audio_chunk = audio_chunk[:self.frame_size]
+                
+            chunk_ts = torch.from_numpy(audio_chunk).to(self.manager.device).unsqueeze(0).unsqueeze(0)
+            codes = self.manager.mimi.encode(chunk_ts)
+            
+            # Model step
+            tokens = self.lm_gen.step(codes)
+            
+            # Decode text token
+            text_token = tokens[0, 0].item()
+            new_text = None
+            if text_token not in {0, 1, 2, 3}:
+                new_text = self.manager.text_tokenizer.IdToPiece(text_token)
+                self.all_text_tokens.append(new_text)
+            
+            # Decode audio tokens
+            out_pcm = self.manager.other_mimi.decode(tokens[:, 1:])
+            out_audio = out_pcm.cpu().detach().numpy().squeeze()
+            
+            return out_audio, new_text
 
 
 class PersonaPlexManager:
@@ -220,7 +318,7 @@ class AudioMultiplexer:
     def __init__(self, sample_rate: int = VOICE_SAMPLE_RATE, chunk_seconds: float = VOICE_CHUNK_SECONDS):
         self.sample_rate = sample_rate
         self.chunk_seconds = chunk_seconds
-        self.subscribers: Set[asyncio.Queue] = set()
+        self.subscribers: Set[Tuple[asyncio.Queue, Optional[asyncio.AbstractEventLoop]]] = set()
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._lock = threading.Lock()
@@ -228,15 +326,21 @@ class AudioMultiplexer:
     def subscribe(self) -> asyncio.Queue:
         """Create a new queue and add it to subscribers."""
         queue = asyncio.Queue()
+        loop = None
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            pass
         with self._lock:
-            self.subscribers.add(queue)
+            self.subscribers.add((queue, loop))
         return queue
 
     def unsubscribe(self, queue: asyncio.Queue):
         """Remove a queue from subscribers."""
         with self._lock:
-            if queue in self.subscribers:
-                self.subscribers.remove(queue)
+            to_remove = [s for s in self.subscribers if s[0] == queue]
+            for s in to_remove:
+                self.subscribers.remove(s)
 
     def start(self):
         """Start the background capture thread."""
@@ -261,22 +365,14 @@ class AudioMultiplexer:
                 chunk = capture_microphone_chunk(self.chunk_seconds, self.sample_rate)
                 if chunk is not None and chunk.size > 0:
                     with self._lock:
-                        # Use a list to iterate to avoid issues if set changes
-                        for q in list(self.subscribers):
+                        for q, loop in list(self.subscribers):
                             try:
-                                # We use call_soon_threadsafe if we were in a loop,
-                                # but since we don't have the loop here easily, 
-                                # we rely on the fact that asyncio.Queue.put_nowait 
-                                # is mostly safe for single-loop applications 
-                                # OR we use a different mechanism.
-                                # Actually, better to use a thread-safe way to get chunks to the queues.
-                                q.put_nowait(chunk)
-                            except asyncio.QueueFull:
-                                try:
-                                    q.get_nowait()
+                                if loop:
+                                    loop.call_soon_threadsafe(q.put_nowait, chunk)
+                                else:
                                     q.put_nowait(chunk)
-                                except Exception:
-                                    pass
+                            except asyncio.QueueFull:
+                                pass
                             except Exception:
                                 pass
         except Exception as e:
@@ -334,104 +430,22 @@ class RollingAudioBuffer:
         return np.concatenate(tail)
 
 
-class PersonaPlexStreamingSession:
-    """Manages an active, stateful streaming session with PersonaPlex models."""
-    
-    def __init__(self, manager, text_prompt: str, voice_prompt_path: str):
-        self.manager = manager
-        self.text_prompt = text_prompt
-        self.voice_prompt_path = voice_prompt_path
-        self.lm_gen = None
-        self.frame_size = 0
-        self._lock = threading.Lock()
-        self.all_text_tokens = []
-        self._is_ready = False
-
-    def start(self):
-        """Initialize the session: load models, run warmup, and step system prompts."""
-        from moshi.offline import warmup, wrap_with_system_tags
-        self.manager.load()
-        
-        # Resolve voice prompt path
-        v_path = Path(self.voice_prompt_path)
-        v_name = v_path.name
-        v_dir = PERSONAPLEX_VOICE_PROMPT_DIR.strip()
-        if not v_dir:
-            v_parent = str(v_path.parent)
-            if v_parent not in {"", "."}:
-                v_dir = v_parent
-        final_voice_prompt = str(Path(v_dir) / v_name) if v_dir else v_name
-
-        with self._lock:
-            self.lm_gen = LMGen(
-                self.manager.lm,
-                audio_silence_frame_cnt=int(0.5 * self.manager.mimi.frame_rate),
-                sample_rate=self.manager.mimi.sample_rate,
-                device=self.manager.device,
-                frame_rate=self.manager.mimi.frame_rate,
-                save_voice_prompt_embeddings=False,
-                use_sampling=True,
-                temp=0.8,
-                temp_text=0.7,
-                top_k=1,
-                top_k_text=1,
-            )
-            self.lm_gen.streaming_forever(1)
-            self.frame_size = int(self.manager.mimi.sample_rate / self.manager.mimi.frame_rate)
-            
-            warmup(self.manager.mimi, self.manager.other_mimi, self.lm_gen, self.manager.device, self.frame_size)
-            
-            if final_voice_prompt.endswith('.pt'):
-                self.lm_gen.load_voice_prompt_embeddings(final_voice_prompt)
-            else:
-                self.lm_gen.load_voice_prompt(final_voice_prompt)
-            
-            self.lm_gen.text_prompt_tokens = self.manager.text_tokenizer.encode(wrap_with_system_tags(self.text_prompt))
-            
-            self.manager.mimi.reset_streaming()
-            self.manager.other_mimi.reset_streaming()
-            self.lm_gen.reset_streaming()
-            self.lm_gen.step_system_prompts(self.manager.mimi)
-            self._is_ready = True
-
-    def step(self, audio_chunk: np.ndarray) -> Tuple[Optional[np.ndarray], Optional[str]]:
-        """Process a single audio chunk and return generated audio and text (if any)."""
-        if not self._is_ready:
-            self.start()
-            
-        with self._lock:
-            # Prepare input chunk
-            if len(audio_chunk) < self.frame_size:
-                audio_chunk = np.pad(audio_chunk, (0, self.frame_size - len(audio_chunk)))
-            elif len(audio_chunk) > self.frame_size:
-                audio_chunk = audio_chunk[:self.frame_size]
-                
-            chunk_ts = torch.from_numpy(audio_chunk).to(self.manager.device).unsqueeze(0).unsqueeze(0)
-            codes = self.manager.mimi.encode(chunk_ts)
-            
-            # Model step
-            tokens = self.lm_gen.step(codes)
-            
-            # Decode text token
-            text_token = tokens[0, 0].item()
-            new_text = None
-            if text_token not in {0, 1, 2, 3}:
-                new_text = self.manager.text_tokenizer.IdToPiece(text_token)
-                self.all_text_tokens.append(new_text)
-            
-            # Decode audio tokens
-            out_pcm = self.manager.other_mimi.decode(tokens[:, 1:])
-            out_audio = out_pcm.cpu().detach().numpy().squeeze()
-            
-            return out_audio, new_text
-
-
 class PersonaPlexServerHandle:
     def __init__(self, process: subprocess.Popen, ssl_dir: str, log_path: str, log_file):
         self.process = process
         self.ssl_dir = ssl_dir
         self.log_path = log_path
         self.log_file = log_file
+
+
+def capture_screen() -> Image.Image:
+    """Capture the primary monitor and return as a PIL Image."""
+    with mss() as sct:
+        # Get the primary monitor
+        monitor = sct.monitors[1]
+        sct_img = sct.grab(monitor)
+        # Convert to PIL Image
+        return Image.frombytes("RGB", sct_img.size, sct_img.bgra, "raw", "BGRX")
 
 
 def extract_text_features(text: str) -> Dict[str, Any]:
