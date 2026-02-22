@@ -567,6 +567,19 @@ class TUIRenderer:
             await self.interaction_log_manager.append(msg)
             self.show_footer_message(msg)
             return
+        if cmd == "/voice-test-tone":
+            from utils import play_test_tone
+            msg = "Playing 1s test tone (440Hz)..."
+            await self.interaction_log_manager.append(msg)
+            self.show_footer_message(msg)
+            try:
+                await asyncio.to_thread(play_test_tone)
+                msg = "Test tone complete."
+            except Exception as e:
+                msg = f"Test tone failed: {e}"
+            await self.interaction_log_manager.append(msg)
+            self.show_footer_message(msg)
+            return
         if cmd == "/voice-start":
             active = self._voice_loop.is_running
             if active:

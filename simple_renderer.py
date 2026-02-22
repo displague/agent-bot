@@ -244,6 +244,15 @@ class SimpleRenderer:
             )
             print(msg)
             return
+        if cmd == "/voice-test-tone":
+            from utils import play_test_tone
+            print("Playing 1s test tone (440Hz)...")
+            try:
+                await asyncio.to_thread(play_test_tone)
+                print("Test tone complete.")
+            except Exception as e:
+                print(f"Test tone failed: {e}")
+            return
         if cmd == "/voice-diagnose":
             for line in self._diagnose_voice_runtime():
                 print(line)

@@ -696,6 +696,17 @@ def play_wav_file(path: str) -> None:
     sd.wait()
 
 
+def play_test_tone(duration: float = 1.0, freq: float = 440.0):
+    """Play a test tone to verify audio output hardware."""
+    if sd is None:
+        raise RuntimeError("sounddevice is not installed; cannot play tone.")
+    samples = int(duration * VOICE_SAMPLE_RATE)
+    t = np.linspace(0, duration, samples, endpoint=False)
+    tone = 0.3 * np.sin(2 * np.pi * freq * t)
+    sd.play(tone.astype(np.float32), samplerate=VOICE_SAMPLE_RATE)
+    sd.wait()
+
+
 def play_wav_file_interruptible(path: str, stop_event: Optional[threading.Event] = None) -> bool:
     """Play a WAV file and optionally stop early when stop_event is set."""
     if sd is None:
