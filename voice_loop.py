@@ -237,8 +237,10 @@ class VoiceLoop:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
+                import traceback
                 err_msg = str(exc) or type(exc).__name__
-                logger.error("Voice listen loop error: %s", err_msg)
+                tb = traceback.format_exc()
+                logger.error("Voice listen loop error: %s\n%s", err_msg, tb)
                 await self._set_activity("error", f"listen error: {err_msg[:80]}")
                 await asyncio.sleep(0.2)
 

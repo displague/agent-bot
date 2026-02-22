@@ -120,30 +120,38 @@ class PersonaPlexStreamingSession:
             self.start()
             
         with self._lock:
-            # Prepare input chunk
-            if len(audio_chunk) < self.frame_size:
-                audio_chunk = np.pad(audio_chunk, (0, self.frame_size - len(audio_chunk)))
-            elif len(audio_chunk) > self.frame_size:
-                audio_chunk = audio_chunk[:self.frame_size]
+            all_out_pcms = []
+            new_texts = []
+            
+            # Process the chunk in frame_size increments
+            for i in range(0, len(audio_chunk), self.frame_size):
+                sub_chunk = audio_chunk[i : i + self.frame_size]
+                if len(sub_chunk) < self.frame_size:
+                    sub_chunk = np.pad(sub_chunk, (0, self.frame_size - len(sub_chunk)))
                 
-            chunk_ts = torch.from_numpy(audio_chunk).to(self.manager.device).unsqueeze(0).unsqueeze(0)
-            codes = self.manager.mimi.encode(chunk_ts)
+                # Ensure contiguous for torch.from_numpy
+                sub_chunk = np.ascontiguousarray(sub_chunk)
+                chunk_ts = torch.from_numpy(sub_chunk).to(self.manager.device).unsqueeze(0).unsqueeze(0)
+                codes = self.manager.mimi.encode(chunk_ts)
+                
+                # Model step
+                tokens = self.lm_gen.step(codes)
+                
+                # Decode text token
+                text_token = tokens[0, 0].item()
+                if text_token not in {0, 1, 2, 3}:
+                    piece = self.manager.text_tokenizer.IdToPiece(text_token)
+                    self.all_text_tokens.append(piece)
+                    new_texts.append(piece)
+                
+                # Decode audio tokens
+                out_pcm = self.manager.other_mimi.decode(tokens[:, 1:])
+                all_out_pcms.append(out_pcm.cpu().detach().numpy().squeeze())
             
-            # Model step
-            tokens = self.lm_gen.step(codes)
+            final_audio = np.concatenate(all_out_pcms) if all_out_pcms else None
+            final_text = "".join(new_texts) if new_texts else None
             
-            # Decode text token
-            text_token = tokens[0, 0].item()
-            new_text = None
-            if text_token not in {0, 1, 2, 3}:
-                new_text = self.manager.text_tokenizer.IdToPiece(text_token)
-                self.all_text_tokens.append(new_text)
-            
-            # Decode audio tokens
-            out_pcm = self.manager.other_mimi.decode(tokens[:, 1:])
-            out_audio = out_pcm.cpu().detach().numpy().squeeze()
-            
-            return out_audio, new_text
+            return final_audio, final_text
 
 
 class PersonaPlexManager:
@@ -284,6 +292,8 @@ class PersonaPlexManager:
                 if len(chunk) < chunk_size:
                     chunk = np.pad(chunk, (0, chunk_size - len(chunk)))
                 
+                # Ensure contiguous for torch.from_numpy
+                chunk = np.ascontiguousarray(chunk)
                 chunk_ts = torch.from_numpy(chunk).to(self.device).unsqueeze(0).unsqueeze(0)
                 codes = self.mimi.encode(chunk_ts)
                 
