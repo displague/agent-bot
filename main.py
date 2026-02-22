@@ -1,5 +1,7 @@
 import os
 import sys
+import argparse
+import shutil
 
 # Disable brittle optimizations early by default
 os.environ.setdefault("NO_TORCH_COMPILE", "1")
@@ -42,6 +44,24 @@ try:
     from dotenv import load_dotenv
 except Exception:  # pragma: no cover - optional at runtime
     load_dotenv = None
+
+
+def _reset_logs():
+    """Clear all log directories."""
+    log_dirs = ["logs", "compressed_logs", "hf_offload", "offload_weights"]
+    for d in log_dirs:
+        if os.path.exists(d):
+            try:
+                # Keep the directory but empty it
+                for item in os.listdir(d):
+                    item_path = os.path.join(d, item)
+                    if os.path.isfile(item_path):
+                        os.unlink(item_path)
+                    elif os.path.isdir(item_path):
+                        shutil.rmtree(item_path)
+                print(f"Cleared log directory: {d}")
+            except Exception as e:
+                print(f"Error clearing {d}: {e}")
 
 
 def _env_enabled(name: str, default: bool = False) -> bool:
@@ -323,11 +343,20 @@ if __name__ == "__main__":
     _ensure_utf8_mode_on_windows()
     _install_sigint_handler()
     _load_environment()
+
+    parser = argparse.ArgumentParser(description="Agent-Bot")
+    parser.add_argument("--reset-logs", action="store_true", help="Clear all logs on startup")
+    parser.add_argument("--dev", action="store_true", help="Enable dev mode (disables autonomous tasks)")
+    args_parsed = parser.parse_args()
+
+    if args_parsed.reset_logs:
+        _reset_logs()
+
     redirect_stderr, restore_stderr, logger = setup_logging()
     backup, f = redirect_stderr()  # Store the file object
     try:
         ui_mode = _resolve_ui_mode()
-        dev_mode = _env_enabled("AGENTBOT_DEV_MODE", default=DEV_DISABLE_AUTONOMOUS)
+        dev_mode = args_parsed.dev or _env_enabled("AGENTBOT_DEV_MODE", default=DEV_DISABLE_AUTONOMOUS)
         curses_ok, curses_mod, reason = _check_curses_available()
 
         if ui_mode == "simple":

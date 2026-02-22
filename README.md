@@ -81,11 +81,15 @@ An autonomous AI agent system that interacts via text or voice, processes intera
 python main.py
 ```
 
+Optional flags:
+- `--reset-logs`: Clear all log files and offload caches on startup.
+- `--dev`: Enable development mode (disables autonomous thoughts/compression).
+
 Quick first-run validation:
-1. Start with simple UI to avoid terminal/curses issues:
+1. Start with simple UI and reset logs:
    ```bash
    # PowerShell
-   $env:AGENTBOT_UI_MODE='simple'; $env:AGENTBOT_DEV_MODE='1'; python main.py
+   $env:AGENTBOT_UI_MODE='simple'; python main.py --reset-logs --dev
    ```
 2. At the prompt, run:
    - `/help`

@@ -19,6 +19,7 @@ from config import (
     PERSONAPLEX_VOICE_PROMPT,
     VOICE_SAMPLE_RATE,
     VOICE_OFFLINE_INFER_TIMEOUT_SECONDS,
+    SKIP_DEEP_REASONING,
 )
 from utils import extract_text_features, extract_audio_features, run_personaplex_offline, play_wav_file_interruptible, transcribe_audio
 
@@ -133,11 +134,15 @@ class InteractionProcessor:
                         # Trigger reflexive verbal filler concurrently with deep reasoning
                         filler_task = asyncio.create_task(self._trigger_verbal_filler())
 
-                        # Process request with multi-phase approach
-                        response = await asyncio.wait_for(
-                            self.functional_agent.handle_request(user_input),
-                            timeout=INTERACTION_PROCESS_TIMEOUT_SECONDS,
-                        )
+                        if SKIP_DEEP_REASONING:
+                            self.logger.info("Skipping deep reasoning per config.")
+                            response = "Okay."
+                        else:
+                            # Process request with multi-phase approach
+                            response = await asyncio.wait_for(
+                                self.functional_agent.handle_request(user_input),
+                                timeout=INTERACTION_PROCESS_TIMEOUT_SECONDS,
+                            )
 
                         await filler_task
                         self.logger.info(f"Response: {response}")
@@ -177,7 +182,6 @@ class InteractionProcessor:
                         except Exception as e:
                             self.logger.error(f"Failed to speak final response: {e}")
 
-                        await self.interaction_log_manager.append(f"Thought: {response}")
                         self.index_manager.index_interaction({"input": user_input, "output": response})
                         self.state["last_processing_status"] = "ok"
                         self.state["last_processing_error"] = ""

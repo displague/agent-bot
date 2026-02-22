@@ -61,6 +61,7 @@ tokenizers==0.22.2 # indirect
 torch==2.10.0+cu130
 torchaudio==2.10.0+cu130
 torchvision==0.25.0+cu130
+triton-windows==3.6.0.post25
 tqdm==4.67.3 # indirect
 transformers==5.2.0
 typer==0.24.1 # indirect

@@ -15,6 +15,7 @@ Use this skill when diagnostics show wrong python env or `torch` lacks CUDA.
    - `cuda_available`
    - CUDA version
 2. Confirm app runtime python and voice runtime python match expected `.venv`.
+3. For Windows: Check if `triton-windows` is installed via `uv pip show triton-windows`.
 
 ## Alignment Procedure
 

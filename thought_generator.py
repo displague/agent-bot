@@ -10,6 +10,7 @@ from config import (
     DAILY_SLEEP_START,
     THOUGHT_MAX_CONCURRENCY,
     THOUGHT_MIN_INTERVAL_SECONDS,
+    SKIP_DEEP_REASONING,
 )
 from functional_agent import FunctionalAgent
 
@@ -42,6 +43,10 @@ class ThoughtGenerator:
             if is_sleep_time and not self.state.get("manual_wake"):
                 self.state["is_sleeping"] = True
                 await asyncio.sleep(random.uniform(5, 10))
+            elif SKIP_DEEP_REASONING:
+                self.state["is_sleeping"] = False
+                # Just wait if reasoning is disabled
+                await asyncio.sleep(10)
             else:
                 self.state["is_sleeping"] = False
                 self.logger.debug("Generating new autonomous thoughts")
