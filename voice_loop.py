@@ -346,11 +346,11 @@ class VoiceLoop:
                             "speaking",
                             "interjecting" if control == "I" else "speaking",
                         )
-                                                            interrupted = await asyncio.to_thread(
-                                                                utils.play_wav_file_interruptible,
-                                                                output_wav,
-                                                                self._playback_interrupt,
-                                                            )
+                        interrupted = await asyncio.to_thread(
+                            utils.play_wav_file_interruptible,
+                            output_wav,
+                            self._playback_interrupt,
+                        )
                         
                         self._speaking = False
                         if interrupted:

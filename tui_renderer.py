@@ -420,8 +420,8 @@ class TUIRenderer:
         cmd = raw.lower()
         parts = raw.split()
         model_manager = (
-            getattr(self.functional_agent, "llama_manager", None)
-            if self.functional_agent is not None
+            getattr(self.interaction_processor, "llama_manager", None)
+            if self.interaction_processor is not None
             else None
         )
         if cmd in {"/quit", "/exit"}:
@@ -620,13 +620,14 @@ class TUIRenderer:
                 # Get the manager from the old processor
                 p_manager = getattr(self.interaction_processor, "personaplex_manager", None)
                 llama_manager = getattr(self.interaction_processor, "llama_manager", None)
+                idx_manager = getattr(self.interaction_processor, "index_manager", None)
                 
                 new_processor = InteractionProcessor(
                     self.interaction_queue,
                     self.state,
                     llama_manager,
                     self.interaction_log_manager,
-                    None, # index_manager (could be passed)
+                    idx_manager,
                     voice_loop=self.voice_loop,
                     personaplex_manager=p_manager
                 )
@@ -661,6 +662,17 @@ class TUIRenderer:
             import config
             config.PERSONAPLEX_TEXT_PROMPT = new_persona
             msg = f"Persona updated: {new_persona[:50]}..."
+            await self.interaction_log_manager.append(msg)
+            self.show_footer_message(msg)
+            return
+        if cmd.startswith("/voice-optimize "):
+            mode = raw[16:].strip().lower()
+            if mode not in ["auto", "eager", "compile", "graphs"]:
+                msg = f"Invalid optimization mode: {mode}. Use auto, eager, compile, or graphs."
+            else:
+                import config
+                config.PERSONAPLEX_OPTIMIZE = mode
+                msg = f"Optimization strategy updated to: {mode}. (Applied on next inference)"
             await self.interaction_log_manager.append(msg)
             self.show_footer_message(msg)
             return

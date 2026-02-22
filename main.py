@@ -3,11 +3,6 @@ import sys
 import argparse
 import shutil
 
-# Disable brittle optimizations early by default
-os.environ.setdefault("NO_TORCH_COMPILE", "1")
-os.environ.setdefault("TORCH_COMPILE_DISABLE", "1")
-os.environ.setdefault("NO_CUDA_GRAPH", "1")
-
 import asyncio
 import signal
 from pathlib import Path

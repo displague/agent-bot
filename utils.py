@@ -42,16 +42,12 @@ try:
 except Exception:  # pragma: no cover - dependency may be optional at runtime
     load_dotenv = None
 
-try:
-    from moshi.offline import run_inference as moshi_run_inference
-    from moshi.models import MimiModel, LMGen, loaders
-    import sentencepiece
-except ImportError:
-    moshi_run_inference = None
-    MimiModel = None
-    LMGen = None
-    loaders = None
-    sentencepiece = None
+# Global placeholders for lazily loaded modules
+moshi_run_inference = None
+MimiModel = None
+LMGen = None
+loaders = None
+sentencepiece = None
 
 logger = logging.getLogger("autonomous_system.utils")
 
@@ -246,85 +242,100 @@ class PersonaPlexManager:
 
     def _apply_optimizations(self):
         """Apply torch.compile and CUDA graph optimizations based on config."""
-        # Fix Moshi's broken streaming propagation logic
-        try:
-            import moshi.modules.streaming
-            def patched_apply_named_streaming(self, fn):
-                def _handle_module(prefix: str, module: torch.nn.Module, recurse: bool = True, is_root: bool = False):
-                    propagate = True
-                    if isinstance(module, moshi.modules.streaming.StreamingModule):
-                        if module._streaming_propagate or is_root:
-                            # logger.debug(f"Streaming: processing {prefix} (propagate={module._streaming_propagate}, root={is_root})")
-                            fn(prefix, module)
-                        else:
-                            # logger.debug(f"Streaming: skipping {prefix} and children")
-                            propagate = False
-                    if not recurse:
-                        return
-                    if propagate:
-                        for name, child in module.named_children():
-                            _handle_module(prefix + ("." if prefix else "") + name, child)
-
-                _handle_module("", self, recurse=False, is_root=True)
-                for name, child in self.named_children():
-                    _handle_module(name, child)
-            
-            moshi.modules.streaming.StreamingModule._apply_named_streaming = patched_apply_named_streaming
-            logger.info("PersonaPlexManager: patched StreamingModule._apply_named_streaming.")
-        except Exception as e:
-            logger.warning("PersonaPlexManager: failed to patch moshi StreamingModule: %s", e)
-
         opt = PERSONAPLEX_OPTIMIZE.lower()
-        if opt == "eager":
-            logger.info("PersonaPlexManager: forcing eager mode (no optimizations).")
-            self._patch_cuda_graphs(disable=True)
-            os.environ["NO_TORCH_COMPILE"] = "1"
-            return
-
-        # Handle 'auto' or explicit 'compile'/'graphs'
+        
+        # 1. Set environment variables based on strategy
         use_compile = (opt in ["auto", "compile", "graphs"])
         use_graphs = (opt in ["auto", "graphs"])
 
         if use_compile:
-            logger.info("PersonaPlexManager: enabling torch.compile (lazy).")
+            logger.info("PersonaPlexManager: enabling torch.compile (unsetting NO_TORCH_COMPILE).")
             os.environ.pop("NO_TORCH_COMPILE", None)
+            os.environ.pop("TORCH_COMPILE_DISABLE", None)
         else:
+            logger.info("PersonaPlexManager: disabling torch.compile.")
             os.environ["NO_TORCH_COMPILE"] = "1"
+            os.environ["TORCH_COMPILE_DISABLE"] = "1"
 
         if use_graphs:
-            logger.info("PersonaPlexManager: allowing CUDA graphs.")
+            logger.info("PersonaPlexManager: allowing CUDA graphs (unsetting NO_CUDA_GRAPH).")
+            os.environ.pop("NO_CUDA_GRAPH", None)
             self._patch_cuda_graphs(disable=False)
         else:
+            logger.info("PersonaPlexManager: disabling CUDA graphs.")
+            os.environ["NO_CUDA_GRAPH"] = "1"
             self._patch_cuda_graphs(disable=True)
+
+        # 2. Fix Moshi's broken streaming propagation logic (even in eager mode)
+        try:
+            import moshi.modules.streaming
+            if not getattr(moshi.modules.streaming.StreamingModule, "_is_patched", False):
+                def patched_apply_named_streaming(self, fn):
+                    def _handle_module(module_inner: torch.nn.Module, prefix: str = "", recurse: bool = True, is_root: bool = False):
+                        propagate = True
+                        if isinstance(module_inner, moshi.modules.streaming.StreamingModule):
+                            if module_inner._streaming_propagate or is_root:
+                                fn(prefix, module_inner)
+                            else:
+                                propagate = False
+                        if not recurse:
+                            return
+                        if propagate:
+                            for name, child in module_inner.named_children():
+                                new_prefix = (prefix + "." + name) if prefix else name
+                                _handle_module(child, prefix=new_prefix)
+
+                    _handle_module(self, is_root=True, recurse=False)
+                    for name, child in self.named_children():
+                        _handle_module(child, prefix=name)
+                
+                moshi.modules.streaming.StreamingModule._apply_named_streaming = patched_apply_named_streaming
+                moshi.modules.streaming.StreamingModule._is_patched = True
+                logger.info("PersonaPlexManager: patched StreamingModule._apply_named_streaming.")
+        except Exception as e:
+            logger.warning("PersonaPlexManager: failed to patch moshi StreamingModule: %s", e)
 
     def _patch_cuda_graphs(self, disable: bool):
         """Patch moshi.models.lm.CUDAGraphed to set the disable flag."""
         self._last_patch_disable = disable
         try:
             import moshi.models.lm
+            if getattr(moshi.models.lm.CUDAGraphed, "_is_patched", False):
+                return
             original_init = moshi.models.lm.CUDAGraphed.__init__
             def patched_init(self, func, warmup_steps=1, disable_orig=False, **kwargs):
                 # We ignore the model's 'disable' hint and use our global one
-                # Note: We must support 'disable' as a keyword if it's passed that way
                 target_disable = kwargs.get('disable', disable_orig)
-                # But we override it with our global preference
                 original_init(self, func, warmup_steps=warmup_steps, disable=disable)
             moshi.models.lm.CUDAGraphed.__init__ = patched_init
-            logger.info("PersonaPlexManager: patched moshi CUDAGraphed (disable=%s)", disable)
+            moshi.models.lm.CUDAGraphed._is_patched = True
+            logger.info("PersonaPlexManager: patched moshi CUDAGraphed.")
         except Exception as e:
             logger.warning("PersonaPlexManager: failed to patch moshi CUDA graphs: %s", e)
 
     def load(self):
         """Load models into VRAM if not already loaded."""
+        global MimiModel, LMGen, loaders, sentencepiece, moshi_run_inference
+        
         if self.mimi is not None:
             return
         
-        if loaders is None:
+        # Apply optimizations BEFORE importing anything from moshi
+        self._apply_optimizations()
+        
+        try:
+            from moshi.offline import run_inference as moshi_run_inference_loaded
+            from moshi.models import MimiModel as MimiModel_loaded, LMGen as LMGen_loaded, loaders as loaders_loaded
+            import sentencepiece as sentencepiece_loaded
+            
+            moshi_run_inference = moshi_run_inference_loaded
+            MimiModel = MimiModel_loaded
+            LMGen = LMGen_loaded
+            loaders = loaders_loaded
+            sentencepiece = sentencepiece_loaded
+        except ImportError:
             logger.error("moshi package not available for in-process loading.")
             raise RuntimeError("moshi package not available for in-process loading.")
-
-        # Apply optimizations before loading modules
-        self._apply_optimizations()
 
         def get_vram():
             if torch is not None and torch.cuda.is_available():
@@ -547,48 +558,54 @@ class AudioMultiplexer:
     def _run_capture(self):
         """Dedicated thread for sounddevice capture to ensure steady timing."""
         logger.info("AudioMultiplexer: starting capture thread.")
+        if sd is None:
+            logger.error("sounddevice not installed. Audio capture disabled.")
+            return
+
+        def callback(indata, frames, time, status):
+            if status:
+                logger.warning("AudioMultiplexer status: %s", status)
+            
+            chunk = indata.copy().squeeze()
+            with self._lock:
+                for queue, loop in self.subscribers:
+                    if loop:
+                        loop.call_soon_threadsafe(queue.put_nowait, chunk)
+                    else:
+                        try:
+                            queue.put_nowait(chunk)
+                        except Exception:
+                            pass
+
         try:
-            while not self._stop_event.is_set():
-                chunk = capture_microphone_chunk(self.chunk_seconds, self.sample_rate)
-                if chunk is not None and chunk.size > 0:
-                    with self._lock:
-                        for q, loop in list(self.subscribers):
-                            try:
-                                if loop:
-                                    loop.call_soon_threadsafe(q.put_nowait, chunk)
-                                else:
-                                    q.put_nowait(chunk)
-                            except asyncio.QueueFull:
-                                pass
-                            except Exception:
-                                pass
+            with sd.InputStream(samplerate=self.sample_rate, channels=1, callback=callback, blocksize=int(self.sample_rate * self.chunk_seconds)):
+                while not self._stop_event.is_set():
+                    self._stop_event.wait(0.1)
         except Exception as e:
-            logger.error("AudioMultiplexer: capture thread error: %s", e)
+            logger.error("AudioMultiplexer capture error: %s", e)
         finally:
             logger.info("AudioMultiplexer: capture thread stopped.")
 
 
 class RollingAudioBuffer:
-    """Independent auditory memory that feeds from AudioMultiplexer."""
+    """Subscriber to AudioMultiplexer that maintains a rolling window of recent audio."""
     
-    def __init__(self, multiplexer: AudioMultiplexer, seconds: float = 10.0):
+    def __init__(self, multiplexer: AudioMultiplexer, max_seconds: float = 10.0):
         self.multiplexer = multiplexer
-        self.seconds = seconds
-        max_chunks = int(seconds / multiplexer.chunk_seconds)
-        self.buffer = collections.deque(maxlen=max_chunks)
-        self.queue = multiplexer.subscribe()
+        self.max_seconds = max_seconds
+        self.sample_rate = multiplexer.sample_rate
+        self.buffer = collections.deque(maxlen=int(max_seconds / multiplexer.chunk_seconds))
+        self._queue = None
+        self._task = None
         self._stop_event = asyncio.Event()
-        self._task: Optional[asyncio.Task] = None
 
     async def start(self):
-        """Start the async task to pull chunks from the multiplexer queue."""
-        if self._task is not None:
-            return
+        self._queue = self.multiplexer.subscribe()
         self._stop_event.clear()
-        self._task = asyncio.create_task(self._run_loop())
+        self._task = asyncio.create_task(self._run())
+        logger.info("RollingAudioBuffer: started.")
 
     async def stop(self):
-        """Stop the buffer task and unsubscribe."""
         self._stop_event.set()
         if self._task:
             self._task.cancel()
@@ -596,103 +613,25 @@ class RollingAudioBuffer:
                 await self._task
             except asyncio.CancelledError:
                 pass
-            self._task = None
-        self.multiplexer.unsubscribe(self.queue)
+        if self._queue:
+            self.multiplexer.unsubscribe(self._queue)
+        logger.info("RollingAudioBuffer: stopped.")
 
-    async def _run_loop(self):
-        try:
-            while not self._stop_event.is_set():
-                chunk = await self.queue.get()
+    async def _run(self):
+        while not self._stop_event.is_set():
+            try:
+                chunk = await self._queue.get()
                 self.buffer.append(chunk)
-        except asyncio.CancelledError:
-            pass
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error("RollingAudioBuffer error: %s", e)
 
-    def get_recent(self, seconds: float = 5.0) -> np.ndarray:
-        """Retrieve the last 'seconds' of audio from the buffer."""
-        chunks_to_get = int(seconds / self.multiplexer.chunk_seconds)
-        available = list(self.buffer)
-        tail = available[-chunks_to_get:] if chunks_to_get < len(available) else available
-        if not tail:
+    def get_audio(self) -> np.ndarray:
+        """Return the current rolling buffer as a single numpy array."""
+        if not self.buffer:
             return np.array([], dtype=np.float32)
-        return np.concatenate(tail)
-
-
-class PersonaPlexServerHandle:
-    def __init__(self, process: subprocess.Popen, ssl_dir: str, log_path: str, log_file):
-        self.process = process
-        self.ssl_dir = ssl_dir
-        self.log_path = log_path
-        self.log_file = log_file
-
-
-def capture_screen() -> Image.Image:
-    """Capture the primary monitor and return as a PIL Image."""
-    with mss() as sct:
-        # Get the primary monitor
-        monitor = sct.monitors[1]
-        sct_img = sct.grab(monitor)
-        # Convert to PIL Image
-        return Image.frombytes("RGB", sct_img.size, sct_img.bgra, "raw", "BGRX")
-
-
-def extract_text_features(text: str) -> Dict[str, Any]:
-    """Basic text features used for lightweight routing/debugging."""
-    cleaned = text.strip()
-    return {
-        "length": len(cleaned),
-        "word_count": len(cleaned.split()) if cleaned else 0,
-    }
-
-
-def extract_audio_features(audio_waveform: np.ndarray) -> Dict[str, Any]:
-    """Basic audio features used for monitoring captured audio quality."""
-    if audio_waveform is None:
-        return {}
-    waveform = np.asarray(audio_waveform)
-    if waveform.size == 0:
-        return {"samples": 0}
-    return {
-        "samples": int(waveform.size),
-        "rms": float(np.sqrt(np.mean(np.square(waveform.astype(np.float32))))),
-        "peak_abs": float(np.max(np.abs(waveform))),
-    }
-
-
-def capture_microphone_to_wav(
-    output_wav: str,
-    duration_seconds: int,
-    sample_rate: int = VOICE_SAMPLE_RATE,
-) -> str:
-    """Record microphone input and save it as mono WAV."""
-    if sd is None:
-        raise RuntimeError("sounddevice is not installed; cannot capture microphone audio.")
-    frames = int(duration_seconds * sample_rate)
-    recording = sd.rec(frames, samplerate=sample_rate, channels=1, dtype="float32")
-    sd.wait()
-    sf.write(output_wav, recording, sample_rate)
-    return output_wav
-
-
-def capture_microphone_chunk(
-    duration_seconds: float,
-    sample_rate: int = VOICE_SAMPLE_RATE,
-) -> np.ndarray:
-    """Capture a short mono chunk from the default microphone."""
-    if sd is None:
-        raise RuntimeError("sounddevice is not installed; cannot capture microphone audio.")
-    frames = max(1, int(duration_seconds * sample_rate))
-    recording = sd.rec(frames, samplerate=sample_rate, channels=1, dtype="float32")
-    sd.wait()
-    return np.asarray(recording).reshape(-1)
-
-
-def play_wav_file(path: str) -> None:
-    """Play a WAV file through the default output device."""
-    if sd is None:
-        raise RuntimeError("sounddevice is not installed; cannot play audio.")
-    data, sample_rate = sf.read(path, always_2d=False)
-    sd.play(data, samplerate=sample_rate)
-    sd.wait()
+        return np.concatenate(list(self.buffer))
 
 
 def play_test_tone(duration: float = 1.0, freq: float = 440.0):
@@ -774,11 +713,14 @@ def play_wav_file_interruptible(path: str, stop_event: Optional[threading.Event]
     
     # Wait for playback to finish
     while True:
-        stream = sd.get_stream()
-        if stream is None or not stream.active:
-            # Note: sd.get_stream() might not be reliable for checking active status on all platforms
-            # sd.wait() is safer but not interruptible easily without a thread
+        try:
+            stream = sd.get_stream()
+            if stream is None or not stream.active:
+                break
+        except Exception:
+            # Fallback if get_stream fails or not supported
             break
+            
         if stop_event is not None and stop_event.is_set():
             interrupted = True
             sd.stop()
@@ -821,11 +763,8 @@ def _resolve_personaplex_python() -> str:
 
 
 def _load_env_if_present() -> None:
-    if load_dotenv is None:
-        return
-    env_path = Path(".env")
-    if env_path.exists():
-        load_dotenv(dotenv_path=env_path, override=False)
+    if load_dotenv:
+        load_dotenv()
 
 
 async def run_personaplex_offline(
@@ -871,40 +810,40 @@ async def run_personaplex_offline(
     if cpu_offload:
         command.append("--cpu-offload")
 
-        # Attempt direct in-process inference if available
-        if moshi_run_inference is not None:
-            logger.info("Running PersonaPlex offline inference directly (in-process).")
-            try:
-                await asyncio.to_thread(
-                    moshi_run_inference,
-                    input_wav=input_wav,
-                    output_wav=output_wav,
-                    output_text=output_text,
-                    text_prompt=text_prompt,
-                    voice_prompt_path=final_voice_path_str,
-                    tokenizer_path=None,
-                    moshi_weight=None,
-                    mimi_weight=None,
-                    hf_repo="nvidia/personaplex-7b-v1",
-                    device=device,
-                    seed=seed,
-                    temp_audio=0.0, # Default greedy
-                    temp_text=0.0,
-                    topk_audio=1,
-                    topk_text=1,
-                    greedy=True,
-                    save_voice_prompt_embeddings=False,
-                    cpu_offload=cpu_offload
-                )
-                generated_text = _decode_output_tokens(output_text)
-                return {
-                    "output_wav": output_wav,
-                    "output_text_path": output_text,
-                    "generated_text": generated_text,
-                    "stdout": "in-process execution",
-                }
-            except Exception as e:
-                logger.warning("Direct PersonaPlex inference failed: %s. Falling back to subprocess.", e)
+    # Attempt direct in-process inference if available
+    if moshi_run_inference is not None:
+        logger.info("Running PersonaPlex offline inference directly (in-process).")
+        try:
+            await asyncio.to_thread(
+                moshi_run_inference,
+                input_wav=input_wav,
+                output_wav=output_wav,
+                output_text=output_text,
+                text_prompt=text_prompt,
+                voice_prompt_path=final_voice_path_str,
+                tokenizer_path=None,
+                moshi_weight=None,
+                mimi_weight=None,
+                hf_repo="nvidia/personaplex-7b-v1",
+                device=device,
+                seed=seed,
+                temp_audio=0.0, # Default greedy
+                temp_text=0.0,
+                topk_audio=1,
+                topk_text=1,
+                greedy=True,
+                save_voice_prompt_embeddings=False,
+                cpu_offload=cpu_offload
+            )
+            generated_text = _decode_output_tokens(output_text)
+            return {
+                "output_wav": output_wav,
+                "output_text_path": output_text,
+                "generated_text": generated_text,
+                "stdout": "in-process execution",
+            }
+        except Exception as e:
+            logger.warning("Direct PersonaPlex inference failed: %s. Falling back to subprocess.", e)
 
     logger.info("Running PersonaPlex offline inference via subprocess.")
     result = subprocess.run(
@@ -928,92 +867,40 @@ async def run_personaplex_offline(
         "output_text_path": output_text,
         "generated_text": generated_text,
         "stdout": result.stdout,
+        "stderr": result.stderr,
     }
 
 
-def start_personaplex_server(cpu_offload: bool = PERSONAPLEX_CPU_OFFLOAD) -> PersonaPlexServerHandle:
-    """Start PersonaPlex server mode for full-duplex interaction."""
-    _load_env_if_present()
-
-    ssl_dir = tempfile.mkdtemp(prefix="personaplex_ssl_")
-    os.makedirs(os.path.dirname(PERSONAPLEX_SERVER_LOG_PATH), exist_ok=True)
-    log_file = open(PERSONAPLEX_SERVER_LOG_PATH, "a", encoding="utf-8")
-    log_file.write("\n=== Starting PersonaPlex server ===\n")
-    log_file.flush()
-    command = [
-        _resolve_personaplex_python(),
-        "-m",
-        "moshi.server",
-        "--ssl",
-        ssl_dir,
-    ]
-    if cpu_offload:
-        command.append("--cpu-offload")
-    logger.info("Starting PersonaPlex server mode.")
-    child_env = os.environ.copy()
-    # Prefer offline cache when token is absent; avoids unnecessary hub calls.
-    if not child_env.get("HF_TOKEN"):
-        child_env.setdefault("HF_HUB_OFFLINE", "1")
-        child_env.setdefault("TRANSFORMERS_OFFLINE", "1")
-    process = subprocess.Popen(
-        command,
-        stdout=log_file,
-        stderr=subprocess.STDOUT,
-        env=child_env,
-    )
-    time.sleep(1.5)
-    if process.poll() is not None:
-        try:
-            with open(PERSONAPLEX_SERVER_LOG_PATH, "r", encoding="utf-8", errors="replace") as f:
-                tail = "".join(f.readlines()[-20:]).strip()
-        except Exception:
-            tail = ""
-        log_file.close()
-        shutil.rmtree(ssl_dir, ignore_errors=True)
-        detail = f" Exit code: {process.returncode}."
-        if tail:
-            detail += f" Server log tail: {tail}"
-        raise RuntimeError("PersonaPlex server exited during startup." + detail)
-
-    return PersonaPlexServerHandle(
-        process=process,
-        ssl_dir=ssl_dir,
-        log_path=PERSONAPLEX_SERVER_LOG_PATH,
-        log_file=log_file,
-    )
+async def transcribe_audio(audio_waveform: np.ndarray) -> str:
+    """Placeholder for audio transcription. Integrate Whisper or similar here."""
+    return "[transcription placeholder]"
 
 
-def stop_personaplex_server(handle: Optional[PersonaPlexServerHandle]) -> None:
-    """Stop a running PersonaPlex server process and clean temporary SSL files."""
-    if handle is None:
-        return
-    try:
-        if handle.process.poll() is None:
-            handle.process.terminate()
-            try:
-                handle.process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                handle.process.kill()
-                handle.process.wait(timeout=5)
-    finally:
-        if getattr(handle, "log_file", None):
-            try:
-                handle.log_file.close()
-            except Exception:
-                pass
-        shutil.rmtree(handle.ssl_dir, ignore_errors=True)
+def extract_text_features(text: str) -> Dict[str, Any]:
+    """Extracts features from text."""
+    return {"length": len(text)}
 
 
-async def transcribe_audio(audio_waveform, sample_rate: int = VOICE_SAMPLE_RATE) -> str:
-    """Compatibility wrapper: convert waveform via PersonaPlex and return generated text."""
-    with tempfile.TemporaryDirectory(prefix="agentbot_voice_") as tmpdir:
-        input_wav = os.path.join(tmpdir, "input.wav")
-        output_wav = os.path.join(tmpdir, "output.wav")
-        output_text = os.path.join(tmpdir, "output.json")
-        sf.write(input_wav, np.asarray(audio_waveform), sample_rate)
-        response = await run_personaplex_offline(
-            input_wav,
-            output_wav,
-            output_text=output_text,
-        )
-        return response.get("generated_text", "")
+def extract_audio_features(audio_waveform: np.ndarray) -> Dict[str, Any]:
+    """Extracts features from audio."""
+    return {"rms": float(np.sqrt(np.mean(np.square(audio_waveform.astype(np.float32)))))}
+
+
+def capture_microphone_chunk(duration: float = VOICE_CHUNK_SECONDS, sample_rate: int = VOICE_SAMPLE_RATE) -> np.ndarray:
+    """Captures a chunk of audio from the microphone."""
+    if sd is None:
+        return np.zeros(int(duration * sample_rate), dtype=np.float32)
+    chunk = sd.rec(int(duration * sample_rate), samplerate=sample_rate, channels=1, dtype='float32')
+    sd.wait()
+    return chunk.squeeze()
+
+
+def capture_screen() -> Image.Image:
+    """Captures the current screen and returns it as a PIL Image."""
+    with mss() as sct:
+        # The monitor part can be expanded to support multiple monitors
+        monitor = sct.monitors[1]
+        sct_img = sct.grab(monitor)
+        # Convert to PIL Image
+        img = Image.frombytes("RGB", sct_img.size, sct_img.bgra, "raw", "BGRX")
+        return img
