@@ -38,6 +38,7 @@ class InteractionProcessor:
         interaction_log_manager,
         index_manager,
         voice_loop=None,
+        personaplex_manager=None,
     ):
         self.interaction_queue = interaction_queue
         self.state = state
@@ -45,6 +46,7 @@ class InteractionProcessor:
         self.interaction_log_manager = interaction_log_manager
         self.index_manager = index_manager
         self.voice_loop = voice_loop
+        self.personaplex_manager = personaplex_manager
         self.functional_agent = FunctionalAgent(self.llama_manager, state=self.state)
         self.logger = logging.getLogger("autonomous_system.interaction_processor")
         self._stop_event = asyncio.Event()
@@ -68,14 +70,21 @@ class InteractionProcessor:
                 silence = np.zeros(samples, dtype=np.float32)
                 sf.write(input_wav, silence, VOICE_SAMPLE_RATE)
                 
-                await asyncio.to_thread(
-                    run_personaplex_offline,
-                    input_wav,
-                    output_wav,
-                    text_prompt=filler,
-                    voice_prompt=PERSONAPLEX_VOICE_PROMPT,
-                    timeout_seconds=VOICE_OFFLINE_INFER_TIMEOUT_SECONDS,
-                )
+                if self.personaplex_manager:
+                    await self.personaplex_manager.infer_async(
+                        text_prompt=filler,
+                        voice_prompt_path=PERSONAPLEX_VOICE_PROMPT,
+                        input_wav_path=input_wav,
+                        output_wav_path=output_wav
+                    )
+                else:
+                    await run_personaplex_offline(
+                        input_wav,
+                        output_wav,
+                        text_prompt=filler,
+                        voice_prompt=PERSONAPLEX_VOICE_PROMPT,
+                        timeout_seconds=VOICE_OFFLINE_INFER_TIMEOUT_SECONDS,
+                    )
                 
                 if os.path.exists(output_wav):
                     await asyncio.to_thread(
@@ -128,14 +137,21 @@ class InteractionProcessor:
                             silence = np.zeros(samples, dtype=np.float32)
                             sf.write(input_wav, silence, VOICE_SAMPLE_RATE)
                             
-                            await asyncio.to_thread(
-                                run_personaplex_offline,
-                                input_wav,
-                                output_wav,
-                                text_prompt=response,
-                                voice_prompt=PERSONAPLEX_VOICE_PROMPT,
-                                timeout_seconds=VOICE_OFFLINE_INFER_TIMEOUT_SECONDS,
-                            )
+                            if self.personaplex_manager:
+                                await self.personaplex_manager.infer_async(
+                                    text_prompt=response,
+                                    voice_prompt_path=PERSONAPLEX_VOICE_PROMPT,
+                                    input_wav_path=input_wav,
+                                    output_wav_path=output_wav
+                                )
+                            else:
+                                await run_personaplex_offline(
+                                    input_wav,
+                                    output_wav,
+                                    text_prompt=response,
+                                    voice_prompt=PERSONAPLEX_VOICE_PROMPT,
+                                    timeout_seconds=VOICE_OFFLINE_INFER_TIMEOUT_SECONDS,
+                                )
                             
                             if os.path.exists(output_wav):
                                 await asyncio.to_thread(

@@ -29,6 +29,7 @@ from thought_generator import ThoughtGenerator
 from event_compressor import EventCompressor
 from runtime_manager import RuntimeManager
 from voice_loop import VoiceLoop
+from utils import PersonaPlexManager
 from process_utils import force_exit_now
 
 try:
@@ -165,7 +166,8 @@ async def main(stdscr=None, renderer_name="auto", renderer_reason="", dev_mode=F
 
     index_manager = IndexManager()
     interaction_log_manager = InteractionLogManager()
-    voice_loop = VoiceLoop(state, interaction_log_manager)
+    personaplex_manager = PersonaPlexManager()
+    voice_loop = VoiceLoop(state, interaction_log_manager, personaplex_manager=personaplex_manager)
 
     llama_manager = LlamaModelManager(
         model_path=MODEL_PATH,
@@ -188,7 +190,7 @@ async def main(stdscr=None, renderer_name="auto", renderer_reason="", dev_mode=F
     )
     interaction_processor = InteractionProcessor(
         interaction_queue, state, llama_manager, interaction_log_manager, index_manager,
-        voice_loop=voice_loop
+        voice_loop=voice_loop, personaplex_manager=personaplex_manager
     )
     if stdscr is not None:
         from tui_renderer import TUIRenderer  # noqa: PLC0415

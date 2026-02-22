@@ -52,9 +52,10 @@ def parse_control_prefix(text: str, prefix: str = VOICE_CONTROL_PREFIX) -> Tuple
 
 
 class VoiceLoop:
-    def __init__(self, state, interaction_log_manager):
+    def __init__(self, state, interaction_log_manager, personaplex_manager=None):
         self.state = state
         self.interaction_log_manager = interaction_log_manager
+        self.personaplex_manager = personaplex_manager
         self._stop_event = asyncio.Event()
         self._listen_task: Optional[asyncio.Task] = None
         self._process_task: Optional[asyncio.Task] = None
@@ -209,16 +210,30 @@ class VoiceLoop:
                     output_wav = os.path.join(tmpdir, "output.wav")
                     output_text = os.path.join(tmpdir, "output.json")
                     sf.write(input_wav, utterance, VOICE_SAMPLE_RATE)
-                    result = await asyncio.to_thread(
-                        run_personaplex_offline,
-                        input_wav,
-                        output_wav,
-                        output_text=output_text,
-                        voice_prompt=PERSONAPLEX_VOICE_PROMPT,
-                        text_prompt=PERSONAPLEX_TEXT_PROMPT,
-                        timeout_seconds=VOICE_OFFLINE_INFER_TIMEOUT_SECONDS,
-                    )
-                    text = result.get("generated_text", "")
+                    
+                    if self.personaplex_manager:
+                        await self.personaplex_manager.infer_async(
+                            text_prompt=PERSONAPLEX_TEXT_PROMPT,
+                            voice_prompt_path=PERSONAPLEX_VOICE_PROMPT,
+                            input_wav_path=input_wav,
+                            output_wav_path=output_wav,
+                            output_text_path=output_text
+                        )
+                        # Text tokens need manual decoding since PersonaPlexManager currently focus on audio
+                        # We still use the offline helper for text for now or extend manager
+                        from utils import _decode_output_tokens
+                        text = _decode_output_tokens(output_text)
+                    else:
+                        result = await run_personaplex_offline(
+                            input_wav,
+                            output_wav,
+                            output_text=output_text,
+                            voice_prompt=PERSONAPLEX_VOICE_PROMPT,
+                            text_prompt=PERSONAPLEX_TEXT_PROMPT,
+                            timeout_seconds=VOICE_OFFLINE_INFER_TIMEOUT_SECONDS,
+                        )
+                        text = result.get("generated_text", "")
+                    
                     control, spoken_text = parse_control_prefix(text)
                     await self.interaction_log_manager.append(
                         f"Voice model [{control}]: {spoken_text or '<empty>'}"
