@@ -219,6 +219,7 @@ class PersonaPlexManager:
         self.mimi = None
         self.other_mimi = None
         self.lm = None
+        self.lm_gen = None  # Warm generator
         self.text_tokenizer = None
         self.repo = "nvidia/personaplex-7b-v1"
         self._lock = threading.Lock()
@@ -385,7 +386,24 @@ class PersonaPlexManager:
                 # Streaming forever setup
                 self.mimi.streaming_forever(1)
                 self.other_mimi.streaming_forever(1)
-                self._status("PersonaPlexManager: models loaded and ready.")
+                
+                # Warm generator setup
+                self.lm_gen = LMGen(
+                    self.lm,
+                    audio_silence_frame_cnt=int(0.5 * self.mimi.frame_rate),
+                    sample_rate=self.mimi.sample_rate,
+                    device=self.device,
+                    frame_rate=self.mimi.frame_rate,
+                    save_voice_prompt_embeddings=False,
+                    use_sampling=True,
+                    temp=0.8,
+                    temp_text=0.7,
+                    top_k=1,
+                    top_k_text=1,
+                )
+                self.lm_gen.streaming_forever(1)
+                
+                self._status("PersonaPlexManager: models and warm generator loaded and ready.")
             except Exception as e:
                 logger.exception("PersonaPlexManager: failed to load models: %s", e)
                 raise
@@ -410,6 +428,52 @@ class PersonaPlexManager:
         """Run a single inference turn asynchronously."""
         return await asyncio.to_thread(self.infer, text_prompt, voice_prompt_path, input_wav_path, output_wav_path, output_text_path)
 
+    def infer_stream(self, text_prompt: str, voice_prompt_path: str, input_wav_path: str):
+        """Generator that yields audio chunks as they are produced."""
+        import moshi.models.lm
+        self._apply_optimizations()
+        self.load()
+        from moshi.offline import wrap_with_system_tags
+        
+        final_text_prompt = text_prompt or PERSONAPLEX_TEXT_PROMPT
+        final_voice_prompt = _ensure_voice_prompt_exists(voice_prompt_path)
+
+        with self._lock:
+            # Load prompts and reset state
+            if final_voice_prompt.endswith('.pt'):
+                self.lm_gen.load_voice_prompt_embeddings(final_voice_prompt)
+            else:
+                self.lm_gen.load_voice_prompt(final_voice_prompt)
+            
+            self.lm_gen.text_prompt_tokens = self.text_tokenizer.encode(wrap_with_system_tags(final_text_prompt))
+            
+            self.mimi.reset_streaming()
+            self.other_mimi.reset_streaming()
+            self.lm_gen.reset_streaming()
+            self.lm_gen.step_system_prompts(self.mimi)
+            
+            # Process input WAV
+            input_data, _ = sf.read(input_wav_path, dtype="float32")
+            if input_data.ndim > 1:
+                input_data = input_data.mean(-1)
+            
+            frame_size = int(self.mimi.sample_rate / self.mimi.frame_rate)
+            chunk_size = frame_size
+            for i in range(0, len(input_data), chunk_size):
+                chunk = input_data[i : i + chunk_size]
+                if len(chunk) < chunk_size:
+                    chunk = np.pad(chunk, (0, chunk_size - len(chunk)))
+                
+                chunk = np.ascontiguousarray(chunk)
+                chunk_ts = torch.from_numpy(chunk).to(self.device).unsqueeze(0).unsqueeze(0)
+                codes = self.mimi.encode(chunk_ts)
+                
+                tokens = self.lm_gen.step(codes)
+                
+                # Decode and yield audio chunk
+                out_pcm = self.other_mimi.decode(tokens[:, 1 : self.lm.dep_q + 1])
+                yield out_pcm.cpu().detach().numpy().squeeze()
+
     def infer(self, text_prompt: str, voice_prompt_path: str, input_wav_path: str, output_wav_path: str, output_text_path: Optional[str] = None):
         """Synchronous inference implementation using the warm models."""
         logger.info("PersonaPlexManager: starting inference for prompt: %s", text_prompt[:100])
@@ -430,38 +494,24 @@ class PersonaPlexManager:
         logger.debug("PersonaPlexManager: using voice prompt path: %s", final_voice_prompt)
 
         with self._lock:
-            # Re-create LMGen for each turn to reset state correctly for now
-            lm_gen = LMGen(
-                self.lm,
-                audio_silence_frame_cnt=int(0.5 * self.mimi.frame_rate),
-                sample_rate=self.mimi.sample_rate,
-                device=self.device,
-                frame_rate=self.mimi.frame_rate,
-                save_voice_prompt_embeddings=False,
-                use_sampling=True,
-                temp=0.8, # More natural for fillers
-                temp_text=0.7,
-                top_k=1,
-                top_k_text=1,
-            )
-            lm_gen.streaming_forever(1)
-            
-            frame_size = int(self.mimi.sample_rate / self.mimi.frame_rate)
+            # Reuse the warm generator
             if PERSONAPLEX_USE_CUDA_GRAPHS:
-                warmup(self.mimi, self.other_mimi, lm_gen, self.device, frame_size)
+                from moshi.offline import warmup
+                frame_size = int(self.mimi.sample_rate / self.mimi.frame_rate)
+                warmup(self.mimi, self.other_mimi, self.lm_gen, self.device, frame_size)
             
             # Load prompts
             if final_voice_prompt.endswith('.pt'):
-                lm_gen.load_voice_prompt_embeddings(final_voice_prompt)
+                self.lm_gen.load_voice_prompt_embeddings(final_voice_prompt)
             else:
-                lm_gen.load_voice_prompt(final_voice_prompt)
+                self.lm_gen.load_voice_prompt(final_voice_prompt)
             
-            lm_gen.text_prompt_tokens = self.text_tokenizer.encode(wrap_with_system_tags(final_text_prompt))
+            self.lm_gen.text_prompt_tokens = self.text_tokenizer.encode(wrap_with_system_tags(final_text_prompt))
             
             self.mimi.reset_streaming()
             self.other_mimi.reset_streaming()
-            lm_gen.reset_streaming()
-            lm_gen.step_system_prompts(self.mimi)
+            self.lm_gen.reset_streaming()
+            self.lm_gen.step_system_prompts(self.mimi)
             
             # Process input WAV
             import soundfile as sf
@@ -469,6 +519,7 @@ class PersonaPlexManager:
             if input_data.ndim > 1:
                 input_data = input_data.mean(-1)
             
+            frame_size = int(self.mimi.sample_rate / self.mimi.frame_rate)
             logger.info("PersonaPlexManager: processing input audio (%d samples)...", len(input_data))
             all_out_pcms = []
             all_text_tokens = []
@@ -484,7 +535,7 @@ class PersonaPlexManager:
                 codes = self.mimi.encode(chunk_ts)
                 
                 # Single step
-                tokens = lm_gen.step(codes)
+                tokens = self.lm_gen.step(codes)
                 
                 # Capture text tokens (k=0)
                 text_token = tokens[0, 0].item()
@@ -634,10 +685,26 @@ class RollingAudioBuffer:
         return np.concatenate(list(self.buffer))
 
 
+def set_audio_devices(input_id: Optional[int] = None, output_id: Optional[int] = None):
+    """Set the default sounddevice input and output device IDs."""
+    if sd is None:
+        return
+    if input_id is not None:
+        sd.default.device[0] = input_id
+    if output_id is not None:
+        sd.default.device[1] = output_id
+    logger.info("Audio devices updated: input=%s, output=%s", sd.default.device[0], sd.default.device[1])
+
+
 def play_test_tone(duration: float = 1.0, freq: float = 440.0):
     """Play a test tone to verify audio output hardware."""
     if sd is None:
         raise RuntimeError("sounddevice is not installed; cannot play tone.")
+    
+    # Log current default or set device
+    dev_idx = sd.default.device[1]
+    logger.info("Playing test tone on output device index: %s", dev_idx)
+    
     samples = int(duration * VOICE_SAMPLE_RATE)
     t = np.linspace(0, duration, samples, endpoint=False)
     tone = 0.3 * np.sin(2 * np.pi * freq * t)
@@ -704,7 +771,8 @@ def play_wav_file_interruptible(path: str, stop_event: Optional[threading.Event]
     if sd is None:
         raise RuntimeError("sounddevice is not installed; cannot play audio.")
     
-    logger.info("Playing audio file: %s", path)
+    dev_idx = sd.default.device[1]
+    logger.info("Playing audio file: %s on output device index: %s", path, dev_idx)
     data, sample_rate = sf.read(path, always_2d=False)
     logger.debug("Read %d samples at %d Hz", len(data), sample_rate)
     

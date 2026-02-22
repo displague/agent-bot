@@ -56,7 +56,9 @@ class VoiceLoop:
         self._stop_event = asyncio.Event()
         self._listen_task: Optional[asyncio.Task] = None
         self._process_task: Optional[asyncio.Task] = None
+        self._playback_task: Optional[asyncio.Task] = None
         self._utterance_queue: asyncio.Queue = asyncio.Queue()
+        self._playback_queue: asyncio.Queue = asyncio.Queue()
         self._audio_queue: Optional[asyncio.Queue] = None
         self._playback_interrupt = threading.Event()
         self._speaking = False
@@ -94,6 +96,7 @@ class VoiceLoop:
             
         self._listen_task = asyncio.create_task(self._listen_loop())
         self._process_task = asyncio.create_task(self._process_loop())
+        self._playback_task = asyncio.create_task(self._playback_loop())
         self._set_state(mode="offline-continuous", server="running", session="local")
         # Audible cue that voice control is active.
         try:
@@ -111,7 +114,7 @@ class VoiceLoop:
     async def stop(self):
         self._stop_event.set()
         self._playback_interrupt.set()
-        tasks = [t for t in (self._listen_task, self._process_task) if t is not None]
+        tasks = [t for t in (self._listen_task, self._process_task, self._playback_task) if t is not None]
         for task in tasks:
             task.cancel()
         if tasks:
@@ -143,6 +146,15 @@ class VoiceLoop:
             and not self._process_task.done()
         )
 
+    async def say_chunks(self, chunks_iterator):
+        """Asynchronously play an iterator of audio chunks."""
+        for chunk in chunks_iterator:
+            if self._stop_event.is_set():
+                break
+            self._playback_queue.put_nowait(chunk)
+            # Match the playback rate roughly
+            await asyncio.sleep(VOICE_CHUNK_SECONDS * 0.8)
+
     def _set_state(self, *, mode: Optional[str] = None, server: Optional[str] = None, session: Optional[str] = None):
         if mode is not None:
             self.state["voice_mode"] = mode
@@ -156,6 +168,35 @@ class VoiceLoop:
         if event:
             self.state["voice_last_event"] = event
             await self.interaction_log_manager.append(f"Voice: {event}")
+
+    async def _playback_loop(self):
+        """Continuously pulls chunks from playback queue and plays them."""
+        import sounddevice as sd
+        while not self._stop_event.is_set():
+            try:
+                chunk = await asyncio.wait_for(self._playback_queue.get(), timeout=0.2)
+                if chunk is None or chunk.size == 0:
+                    continue
+                
+                # Check for silence muting (if all zeros, skip playback)
+                if np.abs(chunk).max() < 1e-5:
+                    continue
+
+                self._speaking = True
+                dev_idx = sd.default.device[1]
+                logger.debug("Playback loop: playing chunk on device %s", dev_idx)
+                sd.play(chunk, samplerate=VOICE_SAMPLE_RATE)
+                # Wait for this chunk to finish before next one
+                # Chunk duration is VOICE_CHUNK_SECONDS (default 0.4s)
+                await asyncio.sleep(VOICE_CHUNK_SECONDS * 0.95)
+                self._speaking = False
+            except asyncio.TimeoutError:
+                continue
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error("Playback loop error: %s", e)
+                await asyncio.sleep(0.1)
 
     async def _listen_loop(self):
         chunks = []
@@ -202,8 +243,8 @@ class VoiceLoop:
 
                     if out_audio is not None and np.abs(out_audio).max() > 0.01:
                         # Model is starting to speak!
-                        # In true full-duplex, we'd stream this audio out. 
-                        # For now, we collect it and we'll play it when the user stops or if model is confident.
+                        # In true full-duplex, we stream this audio out immediately.
+                        self._playback_queue.put_nowait(out_audio)
                         self._streaming_audio_buffer.append(out_audio)
 
                 if is_speech and self._speaking and self._policy == "hard":

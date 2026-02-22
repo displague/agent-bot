@@ -116,7 +116,7 @@ class SimpleRenderer:
             print(
                 "Commands: /help, /model, /llm-status, /llm-diagnose, /smoke, /smoke-model, /smoke-all, "
                 "/voice-start, /voice-stop, /voice-status, /voice-diagnose, /voice-test-tone, /voice-devices, "
-                "/voice-say <text>, /set-persona <text>, /voice-optimize <mode>, /logic-reload, /wake, /sleep, /quit, /force-quit"
+                "/voice-set-device <in|out> <id>, /voice-say <text>, /set-persona <text>, /voice-optimize <mode>, /logic-reload, /wake, /sleep, /quit, /force-quit"
             )
             print("Ctrl+D (EOF) also exits in simple mode.")
             print(f"Voice hotkey is available in curses mode via {VOICE_CAPTURE_KEY_LABEL}.")
@@ -298,6 +298,23 @@ class SimpleRenderer:
                 print("Logic and Utils modules reloaded and processor restarted.")
             except Exception as e:
                 print(f"Logic reload failed: {e}")
+            return
+        if cmd.startswith("/voice-set-device "):
+            parts = raw.split()
+            if len(parts) < 3:
+                print("Usage: /voice-set-device <in|out> <id>")
+            else:
+                target = parts[1].lower()
+                try:
+                    dev_id = int(parts[2])
+                    from utils import set_audio_devices
+                    if target == "in":
+                        set_audio_devices(input_id=dev_id)
+                    elif target == "out":
+                        set_audio_devices(output_id=dev_id)
+                    print(f"Set {target} device to {dev_id}")
+                except ValueError:
+                    print("Invalid device ID")
             return
         if cmd.startswith("/voice-say "):
             text = raw[11:].strip()

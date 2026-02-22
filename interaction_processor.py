@@ -64,24 +64,22 @@ class InteractionProcessor:
         try:
             with tempfile.TemporaryDirectory(prefix="filler_") as tmpdir:
                 input_wav = os.path.join(tmpdir, "silence.wav")
-                output_wav = os.path.join(tmpdir, "filler.wav")
-                
-                # Create a tiny silence file for offline mode to generate from prompt
                 duration = 0.5
                 samples = int(duration * VOICE_SAMPLE_RATE)
                 silence = np.zeros(samples, dtype=np.float32)
                 sf.write(input_wav, silence, VOICE_SAMPLE_RATE)
                 
                 if self.personaplex_manager:
-                    await asyncio.get_running_loop().run_in_executor(
-                        self.personaplex_manager.step_executor,
-                        self.personaplex_manager.infer,
-                        filler,
-                        PERSONAPLEX_VOICE_PROMPT,
-                        input_wav,
-                        output_wav
+                    # Stream chunks directly to voice loop for instant playback
+                    stream = self.personaplex_manager.infer_stream(
+                        text_prompt=filler,
+                        voice_prompt_path=PERSONAPLEX_VOICE_PROMPT,
+                        input_wav_path=input_wav
                     )
+                    await self.voice_loop.say_chunks(stream)
                 else:
+                    # Fallback to offline/sub-process if manager not loaded
+                    output_wav = os.path.join(tmpdir, "filler.wav")
                     await utils.run_personaplex_offline(
                         input_wav,
                         output_wav,
@@ -89,13 +87,12 @@ class InteractionProcessor:
                         voice_prompt=PERSONAPLEX_VOICE_PROMPT,
                         timeout_seconds=VOICE_OFFLINE_INFER_TIMEOUT_SECONDS,
                     )
-                
-                if os.path.exists(output_wav):
-                    await asyncio.to_thread(
-                        utils.play_wav_file_interruptible,
-                        output_wav,
-                        getattr(self.voice_loop, "_playback_interrupt", None)
-                    )
+                    if os.path.exists(output_wav):
+                        await asyncio.to_thread(
+                            utils.play_wav_file_interruptible,
+                            output_wav,
+                            getattr(self.voice_loop, "_playback_interrupt", None)
+                        )
         except Exception as e:
             self.logger.error(f"Failed to trigger verbal filler: {e}")
 
@@ -159,22 +156,21 @@ class InteractionProcessor:
                         try:
                             with tempfile.TemporaryDirectory(prefix="final_") as tmpdir:
                                 input_wav = os.path.join(tmpdir, "silence.wav")
-                                output_wav = os.path.join(tmpdir, "final.wav")
                                 duration = 0.5
                                 samples = int(duration * VOICE_SAMPLE_RATE)
                                 silence = np.zeros(samples, dtype=np.float32)
                                 sf.write(input_wav, silence, VOICE_SAMPLE_RATE)
                                 
                                 if self.personaplex_manager:
-                                    await asyncio.get_running_loop().run_in_executor(
-                                        self.personaplex_manager.step_executor,
-                                        self.personaplex_manager.infer,
-                                        response,
-                                        PERSONAPLEX_VOICE_PROMPT,
-                                        input_wav,
-                                        output_wav
+                                    # Stream final response chunks directly to playback
+                                    stream = self.personaplex_manager.infer_stream(
+                                        text_prompt=response,
+                                        voice_prompt_path=PERSONAPLEX_VOICE_PROMPT,
+                                        input_wav_path=input_wav
                                     )
+                                    await self.voice_loop.say_chunks(stream)
                                 else:
+                                    output_wav = os.path.join(tmpdir, "final.wav")
                                     await utils.run_personaplex_offline(
                                         input_wav,
                                         output_wav,
@@ -182,13 +178,12 @@ class InteractionProcessor:
                                         voice_prompt=PERSONAPLEX_VOICE_PROMPT,
                                         timeout_seconds=VOICE_OFFLINE_INFER_TIMEOUT_SECONDS,
                                     )
-                                
-                                if os.path.exists(output_wav):
-                                    await asyncio.to_thread(
-                                        utils.play_wav_file_interruptible,
-                                        output_wav,
-                                        getattr(self.voice_loop, "_playback_interrupt", None)
-                                    )
+                                    if os.path.exists(output_wav):
+                                        await asyncio.to_thread(
+                                            utils.play_wav_file_interruptible,
+                                            output_wav,
+                                            getattr(self.voice_loop, "_playback_interrupt", None)
+                                        )
                         except Exception as e:
                             self.logger.error(f"Failed to speak final response: {e}")
 

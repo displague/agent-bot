@@ -43,6 +43,7 @@ class TUIRenderer:
         "/voice-diagnose",
         "/voice-test-tone",
         "/voice-devices",
+        "/voice-set-device",
         "/voice-say",
         "/set-persona",
         "/voice-optimize",
@@ -648,6 +649,25 @@ class TUIRenderer:
             except Exception as e:
                 msg = f"Logic reload failed: {e}"
                 self.logger.exception("Logic reload failed")
+            await self.interaction_log_manager.append(msg)
+            self.show_footer_message(msg)
+            return
+        if cmd.startswith("/voice-set-device "):
+            parts = raw.split()
+            if len(parts) < 3:
+                msg = "Usage: /voice-set-device <in|out> <id>"
+            else:
+                target = parts[1].lower()
+                try:
+                    dev_id = int(parts[2])
+                    from utils import set_audio_devices
+                    if target == "in":
+                        set_audio_devices(input_id=dev_id)
+                    elif target == "out":
+                        set_audio_devices(output_id=dev_id)
+                    msg = f"Set {target} device to {dev_id}"
+                except ValueError:
+                    msg = "Invalid device ID"
             await self.interaction_log_manager.append(msg)
             self.show_footer_message(msg)
             return
