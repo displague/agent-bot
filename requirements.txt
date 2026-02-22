@@ -13,4 +13,6 @@ sentencepiece
 sphn
 accelerate
 pytest
--e ./personaplex/moshi
+mss
+Pillow
+moshi @ git+https://github.com/NVIDIA/personaplex.git#subdirectory=moshi
