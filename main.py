@@ -222,7 +222,8 @@ async def main(stdscr=None, renderer_name="auto", renderer_reason="", dev_mode=F
             voice_loop=voice_loop,
         )
     thought_generator = ThoughtGenerator(
-        state, llama_manager, interaction_log_manager, event_scheduler
+        state, llama_manager, interaction_log_manager, event_scheduler,
+        interaction_processor=interaction_processor
     )
     event_compressor = EventCompressor(
         llama_manager,

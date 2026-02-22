@@ -20,7 +20,7 @@ from config import (
     VOICE_SAMPLE_RATE,
     VOICE_OFFLINE_INFER_TIMEOUT_SECONDS,
 )
-from utils import extract_text_features, extract_audio_features, run_personaplex_offline, play_wav_file_interruptible
+from utils import extract_text_features, extract_audio_features, run_personaplex_offline, play_wav_file_interruptible, transcribe_audio
 
 logger = logging.getLogger("autonomous_system.interaction_processor")
 
@@ -47,6 +47,7 @@ class InteractionProcessor:
         self.index_manager = index_manager
         self.voice_loop = voice_loop
         self.personaplex_manager = personaplex_manager
+        self._processing_lock = asyncio.Lock()
         self.functional_agent = FunctionalAgent(self.llama_manager, state=self.state)
         self.logger = logging.getLogger("autonomous_system.interaction_processor")
         self._stop_event = asyncio.Event()
@@ -100,24 +101,25 @@ class InteractionProcessor:
         self.logger.debug("Starting interaction processing...")
         while not self._stop_event.is_set():
             if not self.interaction_queue.empty():
-                try:
-                    interaction = self.interaction_queue.get_nowait()
-                    user_input = interaction.get("input", "")
-                    audio_waveform = interaction.get("audio_waveform", None)
-                    
-                    # If audio is present but input is empty, transcribe first
-                    if audio_waveform is not None and not user_input:
-                        self.state["processing_phase"] = "Transcribing"
-                        self.logger.info("Transcribing audio waveform...")
-                        user_input = await transcribe_audio(audio_waveform)
-                        self.logger.info(f"Transcribed: {user_input}")
-                        if not user_input:
-                            self.logger.info("Empty transcription, skipping interaction.")
-                            self.state["unprocessed_interactions"] = max(0, self.state["unprocessed_interactions"] - 1)
-                            continue
-                        await self.interaction_log_manager.append(f"Voice Input: {user_input}")
+                async with self._processing_lock:
+                    try:
+                        interaction = self.interaction_queue.get_nowait()
+                        user_input = interaction.get("input", "")
+                        audio_waveform = interaction.get("audio_waveform", None)
+                        
+                        # If audio is present but input is empty, transcribe first
+                        if audio_waveform is not None and not user_input:
+                            self.state["processing_phase"] = "Transcribing"
+                            self.logger.info("Transcribing audio waveform...")
+                            user_input = await transcribe_audio(audio_waveform)
+                            self.logger.info(f"Transcribed: {user_input}")
+                            if not user_input:
+                                self.logger.info("Empty transcription, skipping interaction.")
+                                self.state["unprocessed_interactions"] = max(0, self.state["unprocessed_interactions"] - 1)
+                                continue
+                            await self.interaction_log_manager.append(f"Voice Input: {user_input}")
 
-                    self.state["is_processing"] = True
+                        self.state["is_processing"] = True
                     self.state["last_processing_input"] = (user_input or "")[:240]
                     self.state["last_processing_started_at"] = datetime.now().isoformat()
                     self.state["last_processing_status"] = "running"
@@ -182,9 +184,9 @@ class InteractionProcessor:
                     self.state["unprocessed_interactions"] = max(
                         0, self.state["unprocessed_interactions"] - 1
                     )
-                    await asyncio.sleep(random.uniform(0.5, 1.5))
+                    await asyncio.sleep(random.uniform(1.0, 2.0))
                 except asyncio.QueueEmpty:
-                    await asyncio.sleep(0.05)
+                    pass
                 except asyncio.TimeoutError:
                     msg = (
                         f"interaction timeout after {INTERACTION_PROCESS_TIMEOUT_SECONDS}s"

@@ -31,13 +31,14 @@ except Exception:  # pragma: no cover - optional dependency at runtime
     Llama = None
 
 try:
-    from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer, AutoProcessor
+    from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer, AutoProcessor, BitsAndBytesConfig
     import torch
 except Exception:  # pragma: no cover - optional dependency at runtime
     AutoConfig = None
     AutoModelForCausalLM = None
     AutoTokenizer = None
     AutoProcessor = None
+    BitsAndBytesConfig = None
     torch = None
 
 logger = logging.getLogger("autonomous_system.llama_model_manager")
@@ -188,11 +189,23 @@ class LlamaModelManager:
             config = AutoConfig.from_pretrained(repo_id, trust_remote_code=True)
         os.makedirs(MODEL_TRANSFORMERS_OFFLOAD_DIR, exist_ok=True)
         self._status(f"Loading transformer weights: {repo_id} (first run may take a while)")
+        
+        bnb_config = None
+        if BitsAndBytesConfig is not None and PERSONAPLEX_DEVICE == "cuda":
+            bnb_config = BitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_compute_dtype=torch.bfloat16,
+                bnb_4bit_quant_type="nf4",
+                bnb_4bit_use_double_quant=True,
+            )
+            self._status("Using 4-bit quantization (bitsandbytes)")
+
         self.hf_model = AutoModelForCausalLM.from_pretrained(
             repo_id,
             config=config,
-            torch_dtype=torch.bfloat16 if PERSONAPLEX_DEVICE == "cuda" else "auto",
+            torch_dtype=torch.bfloat16 if PERSONAPLEX_DEVICE == "cuda" and bnb_config is None else "auto",
             device_map="auto",
+            quantization_config=bnb_config,
             offload_folder=MODEL_TRANSFORMERS_OFFLOAD_DIR,
             offload_state_dict=True,
             low_cpu_mem_usage=True,
