@@ -339,6 +339,8 @@ async def main(stdscr=None, renderer_name="auto", renderer_reason="", dev_mode=F
 
         await runtime_manager.cancel_all_tasks(timeout_seconds=SHUTDOWN_GRACE_SECONDS)
         runtime_manager.shutdown_executors()
+        if personaplex_manager:
+            personaplex_manager.shutdown()
         restore_stderr(backup, f)
         logger.info("Application stopped")
 

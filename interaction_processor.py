@@ -73,11 +73,13 @@ class InteractionProcessor:
                 sf.write(input_wav, silence, VOICE_SAMPLE_RATE)
                 
                 if self.personaplex_manager:
-                    await self.personaplex_manager.infer_async(
-                        text_prompt=filler,
-                        voice_prompt_path=PERSONAPLEX_VOICE_PROMPT,
-                        input_wav_path=input_wav,
-                        output_wav_path=output_wav
+                    await asyncio.get_running_loop().run_in_executor(
+                        self.personaplex_manager.step_executor,
+                        self.personaplex_manager.infer,
+                        filler,
+                        PERSONAPLEX_VOICE_PROMPT,
+                        input_wav,
+                        output_wav
                     )
                 else:
                     await run_personaplex_offline(
@@ -158,11 +160,13 @@ class InteractionProcessor:
                                 sf.write(input_wav, silence, VOICE_SAMPLE_RATE)
                                 
                                 if self.personaplex_manager:
-                                    await self.personaplex_manager.infer_async(
-                                        text_prompt=response,
-                                        voice_prompt_path=PERSONAPLEX_VOICE_PROMPT,
-                                        input_wav_path=input_wav,
-                                        output_wav_path=output_wav
+                                    await asyncio.get_running_loop().run_in_executor(
+                                        self.personaplex_manager.step_executor,
+                                        self.personaplex_manager.infer,
+                                        response,
+                                        PERSONAPLEX_VOICE_PROMPT,
+                                        input_wav,
+                                        output_wav
                                     )
                                 else:
                                     await run_personaplex_offline(

@@ -186,10 +186,18 @@ class VoiceLoop:
                         self._streaming_session = self.personaplex_manager.create_session(
                             PERSONAPLEX_TEXT_PROMPT, PERSONAPLEX_VOICE_PROMPT
                         )
-                        # We run start in a thread to not block the listen loop
-                        await asyncio.to_thread(self._streaming_session.start)
+                        # Use the dedicated sequential executor to avoid jitter
+                        await asyncio.get_running_loop().run_in_executor(
+                            self.personaplex_manager.step_executor,
+                            self._streaming_session.start
+                        )
                     
-                    out_audio, out_text = await asyncio.to_thread(self._streaming_session.step, chunk_to_process)
+                    # Use the dedicated sequential executor for every step
+                    out_audio, out_text = await asyncio.get_running_loop().run_in_executor(
+                        self.personaplex_manager.step_executor,
+                        self._streaming_session.step,
+                        chunk_to_process
+                    )
                     
                     if out_text:
                         self._streaming_text_buffer += out_text

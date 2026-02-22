@@ -226,6 +226,15 @@ class PersonaPlexManager:
         self.text_tokenizer = None
         self.repo = "nvidia/personaplex-7b-v1"
         self._lock = threading.Lock()
+        # Dedicated executor for sequential, low-jitter inference
+        from concurrent.futures import ThreadPoolExecutor
+        self.step_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="personaplex_step")
+
+    def shutdown(self):
+        """Shut down the manager and its executors."""
+        if hasattr(self, "step_executor"):
+            self.step_executor.shutdown(wait=True)
+            logger.info("PersonaPlexManager: step_executor shut down.")
 
     def _status(self, message: str):
         logger.info(message)
@@ -237,6 +246,21 @@ class PersonaPlexManager:
 
     def _apply_optimizations(self):
         """Apply torch.compile and CUDA graph optimizations based on config."""
+        # Patch LMModel to enable depformer streaming propagation
+        # This is a critical fix for the IndexError: index 16 is out of range
+        try:
+            import moshi.models.lm
+            # We want to catch the moment depformer is initialized and ensure propagate is True
+            orig_lm_init = moshi.models.lm.LMModel.__init__
+            def patched_lm_init(self, *args, **kwargs):
+                orig_lm_init(self, *args, **kwargs)
+                if hasattr(self, "depformer"):
+                    self.depformer.set_streaming_propagate(True)
+                    logger.info("PersonaPlexManager: forced depformer streaming propagation to True.")
+            moshi.models.lm.LMModel.__init__ = patched_lm_init
+        except Exception as e:
+            logger.warning("PersonaPlexManager: failed to patch moshi LMModel: %s", e)
+
         opt = PERSONAPLEX_OPTIMIZE.lower()
         if opt == "eager":
             logger.info("PersonaPlexManager: forcing eager mode (no optimizations).")
