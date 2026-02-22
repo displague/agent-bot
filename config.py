@@ -45,6 +45,13 @@ PERSONAPLEX_DEVICE = "cuda"
 PERSONAPLEX_CPU_OFFLOAD = False
 PERSONAPLEX_OFFLINE_TIMEOUT_SECONDS = 900
 PERSONAPLEX_PYTHON_BIN = ""
+PERSONAPLEX_VERBAL_FILLERS = [
+    "Hmm, let me think about that for a second...",
+    "One moment, I'm just checking on that...",
+    "That's an interesting question, let me see...",
+    "Oh, hold on, I think I know what you're talking about...",
+    "Let me ponder that for a bit...",
+]
 SMOKE_MODEL_TIMEOUT_SECONDS = 120
 INTERACTION_PROCESS_TIMEOUT_SECONDS = 300
 LLM_DIAG_TIMEOUT_SECONDS = 40

@@ -181,7 +181,8 @@ async def main(stdscr=None, renderer_name="auto", renderer_reason="", dev_mode=F
         state, interaction_log_manager, index_manager, runtime_manager=runtime_manager
     )
     interaction_processor = InteractionProcessor(
-        interaction_queue, state, llama_manager, interaction_log_manager, index_manager
+        interaction_queue, state, llama_manager, interaction_log_manager, index_manager,
+        voice_loop=voice_loop
     )
     if stdscr is not None:
         from tui_renderer import TUIRenderer  # noqa: PLC0415

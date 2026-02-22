@@ -3,12 +3,24 @@
 import asyncio
 import json
 import random
-from datetime import datetime
+import os
+import tempfile
 import logging
+from datetime import datetime
+
+import numpy as np
+import soundfile as sf
 
 from functional_agent import FunctionalAgent
-from config import INTERACTION_LOG_PATH, INTERACTION_PROCESS_TIMEOUT_SECONDS
-from utils import extract_text_features, extract_audio_features
+from config import (
+    INTERACTION_LOG_PATH, 
+    INTERACTION_PROCESS_TIMEOUT_SECONDS,
+    PERSONAPLEX_VERBAL_FILLERS,
+    PERSONAPLEX_VOICE_PROMPT,
+    VOICE_SAMPLE_RATE,
+    VOICE_OFFLINE_INFER_TIMEOUT_SECONDS,
+)
+from utils import extract_text_features, extract_audio_features, run_personaplex_offline, play_wav_file_interruptible
 
 logger = logging.getLogger("autonomous_system.interaction_processor")
 
@@ -25,15 +37,54 @@ class InteractionProcessor:
         llama_manager,
         interaction_log_manager,
         index_manager,
+        voice_loop=None,
     ):
         self.interaction_queue = interaction_queue
         self.state = state
         self.llama_manager = llama_manager
         self.interaction_log_manager = interaction_log_manager
         self.index_manager = index_manager
+        self.voice_loop = voice_loop
         self.functional_agent = FunctionalAgent(self.llama_manager, state=self.state)
         self.logger = logging.getLogger("autonomous_system.interaction_processor")
         self._stop_event = asyncio.Event()
+
+    async def _trigger_verbal_filler(self):
+        """Immediately triggers a reflexive verbal filler through PersonaPlex."""
+        if not self.voice_loop or not PERSONAPLEX_VERBAL_FILLERS:
+            return
+        
+        filler = random.choice(PERSONAPLEX_VERBAL_FILLERS)
+        self.logger.info(f"Triggering verbal filler: {filler}")
+        
+        try:
+            with tempfile.TemporaryDirectory(prefix="filler_") as tmpdir:
+                input_wav = os.path.join(tmpdir, "silence.wav")
+                output_wav = os.path.join(tmpdir, "filler.wav")
+                
+                # Create a tiny silence file for offline mode to generate from prompt
+                duration = 0.5
+                samples = int(duration * VOICE_SAMPLE_RATE)
+                silence = np.zeros(samples, dtype=np.float32)
+                sf.write(input_wav, silence, VOICE_SAMPLE_RATE)
+                
+                await asyncio.to_thread(
+                    run_personaplex_offline,
+                    input_wav,
+                    output_wav,
+                    text_prompt=filler,
+                    voice_prompt=PERSONAPLEX_VOICE_PROMPT,
+                    timeout_seconds=VOICE_OFFLINE_INFER_TIMEOUT_SECONDS,
+                )
+                
+                if os.path.exists(output_wav):
+                    await asyncio.to_thread(
+                        play_wav_file_interruptible,
+                        output_wav,
+                        getattr(self.voice_loop, "_playback_interrupt", None)
+                    )
+        except Exception as e:
+            self.logger.error(f"Failed to trigger verbal filler: {e}")
 
     async def start(self):
         """Starts the interaction processing."""
@@ -55,13 +106,45 @@ class InteractionProcessor:
                     if audio_waveform is not None:
                         audio_features = extract_audio_features(audio_waveform)
 
+                    # Trigger reflexive verbal filler concurrently with deep reasoning
+                    filler_task = asyncio.create_task(self._trigger_verbal_filler())
+
                     # Process request with multi-phase approach
                     response = await asyncio.wait_for(
                         self.functional_agent.handle_request(user_input),
                         timeout=INTERACTION_PROCESS_TIMEOUT_SECONDS,
                     )
 
+                    await filler_task
                     self.logger.info(f"Response: {response}")
+
+                    # Speak final deep response aloud
+                    try:
+                        with tempfile.TemporaryDirectory(prefix="final_") as tmpdir:
+                            input_wav = os.path.join(tmpdir, "silence.wav")
+                            output_wav = os.path.join(tmpdir, "final.wav")
+                            duration = 0.5
+                            samples = int(duration * VOICE_SAMPLE_RATE)
+                            silence = np.zeros(samples, dtype=np.float32)
+                            sf.write(input_wav, silence, VOICE_SAMPLE_RATE)
+                            
+                            await asyncio.to_thread(
+                                run_personaplex_offline,
+                                input_wav,
+                                output_wav,
+                                text_prompt=response,
+                                voice_prompt=PERSONAPLEX_VOICE_PROMPT,
+                                timeout_seconds=VOICE_OFFLINE_INFER_TIMEOUT_SECONDS,
+                            )
+                            
+                            if os.path.exists(output_wav):
+                                await asyncio.to_thread(
+                                    play_wav_file_interruptible,
+                                    output_wav,
+                                    getattr(self.voice_loop, "_playback_interrupt", None)
+                                )
+                    except Exception as e:
+                        self.logger.error(f"Failed to speak final response: {e}")
 
                     await self.interaction_log_manager.append(f"Thought: {response}")
                     log_entry = {
