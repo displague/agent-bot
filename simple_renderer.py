@@ -224,11 +224,21 @@ class SimpleRenderer:
             print("Voice loop stopped.")
             return
         if cmd == "/voice-status":
-            print(
-                f"Voice loop: {'running' if self._voice_loop.is_running else 'stopped'} "
+            active = self._voice_loop.is_running
+            p_manager = getattr(self._voice_loop, "personaplex_manager", None)
+            p_status = p_manager.get_status() if p_manager else {}
+            
+            msg = (
+                f"Voice loop: {'running' if active else 'stopped'} "
                 f"mode={self.state.get('voice_mode')} "
-                f"activity={self.state.get('voice_activity_state')}"
+                f"activity={self.state.get('voice_activity_state')} "
+                f"loaded={p_status.get('loaded')} "
+                f"opt={p_status.get('optimize_strategy')} "
+                f"compile={p_status.get('torch_compile')} "
+                f"graphs={p_status.get('cuda_graphs')} "
+                f"dev={p_status.get('device')}"
             )
+            print(msg)
             return
         if cmd == "/voice-diagnose":
             for line in self._diagnose_voice_runtime():

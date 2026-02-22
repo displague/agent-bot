@@ -262,6 +262,7 @@ class PersonaPlexManager:
 
     def _patch_cuda_graphs(self, disable: bool):
         """Patch moshi.models.lm.CUDAGraphed to set the disable flag."""
+        self._last_patch_disable = disable
         try:
             import moshi.models.lm
             original_init = moshi.models.lm.CUDAGraphed.__init__
@@ -344,6 +345,18 @@ class PersonaPlexManager:
     def create_session(self, text_prompt: str, voice_prompt_path: str) -> PersonaPlexStreamingSession:
         """Create a new streaming session."""
         return PersonaPlexStreamingSession(self, text_prompt, voice_prompt_path)
+
+    def get_status(self) -> Dict[str, Any]:
+        """Return detailed status of the manager and models."""
+        with self._lock:
+            return {
+                "loaded": self.mimi is not None,
+                "device": self.device,
+                "cpu_offload": self.cpu_offload,
+                "optimize_strategy": PERSONAPLEX_OPTIMIZE,
+                "torch_compile": os.environ.get("NO_TORCH_COMPILE") != "1",
+                "cuda_graphs": getattr(self, "_last_patch_disable", None) is False,
+            }
 
     async def infer_async(self, text_prompt: str, voice_prompt_path: str, input_wav_path: str, output_wav_path: str, output_text_path: Optional[str] = None):
         """Run a single inference turn asynchronously."""

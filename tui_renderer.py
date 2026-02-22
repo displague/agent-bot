@@ -541,10 +541,18 @@ class TUIRenderer:
             return
         if cmd == "/voice-status":
             active = self._voice_loop.is_running
+            p_manager = getattr(self._voice_loop, "personaplex_manager", None)
+            p_status = p_manager.get_status() if p_manager else {}
+            
             msg = (
                 f"Voice loop: {'running' if active else 'stopped'} "
                 f"mode={self.state.get('voice_mode')} "
-                f"activity={self.state.get('voice_activity_state')}"
+                f"activity={self.state.get('voice_activity_state')} "
+                f"loaded={p_status.get('loaded')} "
+                f"opt={p_status.get('optimize_strategy')} "
+                f"compile={p_status.get('torch_compile')} "
+                f"graphs={p_status.get('cuda_graphs')} "
+                f"dev={p_status.get('device')}"
             )
             self.state["voice_server_state"] = "running" if active else "stopped"
             self.state["voice_session_state"] = "local" if active else "disconnected"
