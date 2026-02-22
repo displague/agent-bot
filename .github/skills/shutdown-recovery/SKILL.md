@@ -5,29 +5,29 @@ description: Recover from stuck shutdowns in agent-bot and implement robust term
 
 # Shutdown Recovery
 
-Use this skill when app hangs on "Interrupted/Shutting down" or Ctrl+C does not exit.
+Use this skill when app hangs on "Starting shutdown sequence" or Ctrl+C does not exit.
 
 ## Recovery Procedure
 
 1. Attempt graceful shutdown once.
-2. If still running after a short timeout, trigger hard stop:
-   - second `Ctrl+C` force path
-   - `/force-quit` command path
-3. Ensure the full process tree is terminated, not only parent PID.
+2. Observe the 10-second hard-kill watchdog:
+   - If cleanup exceeds 10s, "Shutdown watchdog triggered" should appear.
+   - Confirm the process tree is killed via `force_exit_now`.
+3. If capture thread hangs:
+   - Check `AudioMultiplexer.stop()` and `join()` logic.
 
 ## Implementation Rules
 
-- Graceful path must be bounded by timeout.
-- Force path must be immediate and explicit in UI output.
-- Any blocked worker/thread should not prevent process exit in force mode.
-- Keep cleanup idempotent (safe to call multiple times).
+- Graceful path must be bounded by individual component timeouts (e.g., 2s for scheduler).
+- Watchdog must be independent (daemon thread) to ensure it triggers regardless of main-loop blocking.
+- Cleanup should include stopping `RollingAudioBuffer` and `AudioMultiplexer`.
 
 ## Validation
 
-1. Start voice loop.
-2. Trigger a synthetic long-running inference.
-3. Press Ctrl+C once (graceful), then again (force).
-4. Confirm process exits and prompt returns promptly.
+1. Start voice loop and ensure capture is active.
+2. Press Ctrl+C once.
+3. Confirm "Starting shutdown sequence" log appears.
+4. Verify process exits within 10s (graceful) or exactly at 10s (watchdog).
 
 ## File Touchpoints
 

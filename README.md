@@ -5,31 +5,30 @@ An autonomous AI agent system that interacts via text or voice, processes intera
 ## Features
 
 - **Bidirectional Audio Interaction**: Uses NVIDIA PersonaPlex for real-time, full-duplex speech-to-speech conversations with persona control and voice conditioning.
-- **Multi-Phase Reasoning**: Breaks down tasks into planning, execution, digestion, validation, and response phases.
-- **Model Switching**: Runtime `/model` command to inspect and switch between configured model backends (default is `gpt-oss`).
+- **Auditory Memory**: 10-second rolling audio buffer powered by a shared `AudioMultiplexer`, allowing the agent to "hear" and analyze environmental context.
+- **Multi-Modal Reasoning**: Powered by `google/gemma-3n-E2B-it`, supporting native text and audio analysis.
+- **Cognitive Handoff**: Immediate reflexive "verbal fillers" via PersonaPlex while the LLM performs deep reasoning in the background.
+- **Multi-Phase Reasoning**: Breaks down tasks into planning, execution, digestion, validation, and response phases with real-time UI visibility.
+- **Model Switching**: Runtime `/model` command to inspect and switch between configured model backends (default is `gemma-it`).
 - **Autonomous Operation**: Generates periodic "thoughts" during active hours, compresses interaction logs hourly, and schedules events like reminders or training.
 - **Logging and Indexing**: Maintains hard logs (JSONL), compressed summaries, and a keyword-based index for context retrieval.
-- **TUI Interface**: Real-time interface using curses, showing status, thoughts, interaction history, and debug info. Supports text input or voice (via PersonaPlex integration).
-- **Event Management**: Handles deferred topics, lookups, RAG completions, and training events.
-- **State Management**: Tracks unprocessed interactions, ongoing thoughts, sleep status, and next events.
+- **Enhanced TUI Interface**: Real-time curses interface with status, thoughts, and interaction history. Features input history (Up/Down), log scrolling (PgUp/PgDn), and cursor editing (Left/Right).
+- **Event Management**: Handles deferred topics, lookups, RAG completions, and training events with specific time-tracking.
+- **Robust Shutdown**: Graceful shutdown sequence with a 10-second hard-kill watchdog.
 
 ## Architecture
 
-- `main.py`: Entry point; initializes and runs all components asynchronously using curses for TUI.
+- `main.py`: Entry point; initializes the auditory backbone, model managers, and runs all components asynchronously.
 - `runtime_manager.py`: Manages shared executors and tracked async tasks for graceful shutdown.
-- `tui_renderer.py`: Manages the curses-based TUI; handles rendering, input (text/voice), scrolling, and screen switching.
-- `interaction_processor.py`: Dequeues interactions, processes via `FunctionalAgent`, logs to files, indexes entries, and updates state.
-- `functional_agent.py`: Orchestrates multi-phase processing using `LlamaModelManager`.
-- `llama_model_manager.py`: Manages model backends (`llama_cpp` and `transformers`), HF-cache model resolution, and runtime switching.
-- `thought_generator.py`: Generates autonomous thoughts during active hours using `FunctionalAgent`.
-- `event_scheduler.py`: Async queue for events; handles scheduling and execution.
-- `event_compressor.py`: Hourly compression of logs using Llama to summarize interactions; saves compressed logs and triggers RAG events.
-- `interaction_log_manager.py`: In-memory log with async locking; provides paginated display data.
-- `index_manager.py`: Builds/saves a JSON index of interactions by keywords; supports context searches.
-- `utils.py`: Utility functions; includes speech-to-speech functions via PersonaPlex.
-- `voice_loop.py`: Continuous offline voice loop with VAD segmentation, state transitions, and interruption handling.
-- `config.py`: Constants for paths (logs, index), sleep times, workers, and model catalog/aliases.
-- `logging_setup.py`: Configures logging to files and stderr redirection.
+- `tui_renderer.py`: Manages the curses-based TUI; handles rendering, input history, cursor editing, and log scrolling.
+- `interaction_processor.py`: Orchestrates cognitive handoff between immediate fillers and multi-phase LLM reasoning.
+- `functional_agent.py`: Manages multi-phase processing and explicitly tracks conversation history (user/assistant roles).
+- `llama_model_manager.py`: Manages model backends, including Gemma-3n multi-modal support via `AutoProcessor` and bfloat16 precision.
+- `thought_generator.py`: Generates autonomous thoughts with manual wake/sleep override support.
+- `event_scheduler.py`: Tracks and triggers timed events, updating the "Next event" status in real-time.
+- `utils.py`: Contains core infrastructure: `AudioMultiplexer`, `RollingAudioBuffer`, and `PersonaPlexManager` (persistent VRAM models).
+- `voice_loop.py`: Full-duplex streaming voice loop that processes audio chunks in real-time via the multiplexer.
+- `config.py`: Central configuration for paths, model catalog, timeouts, and verbal fillers.
 
 ## Setup
 

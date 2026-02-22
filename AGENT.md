@@ -4,36 +4,25 @@ This document outlines the roles, tools, protocols, and guidelines for AI agents
 
 ## Roles
 
-- **Audio Processing Agent**: Handles PersonaPlex integration for speech-to-speech conversion, voice conditioning, and persona prompts. Manages audio input/output, Opus codec usage, and offline continuous voice mode.
-- **Reasoning Agent**: Oversees multi-phase processing (planning, execution, digestion, validation, response) using the model manager. Simulates function calls for tasks like searching indexes or scheduling events.
-- **UI Agent**: Manages the curses-based TUI, including rendering, input handling (text/voice), scrolling, and screen switching. Integrates audio controls with the interface.
-- **Logging and Indexing Agent**: Maintains interaction logs (JSONL), compressed summaries, and keyword-based indexes. Handles log compression, context retrieval, and state tracking.
-- **Event Management Agent**: Manages the async event queue for scheduling, reminders, lookups, RAG completions, and training events.
-- **Autonomous Operation Agent**: Generates periodic thoughts during active hours (7 AM - 11 PM), monitors sleep status, and triggers autonomous actions.
-- **Integration Agent**: Coordinates overall system integration, dependency management, configuration updates, and testing.
+- **Audio Processing Agent**: Manages the `AudioMultiplexer` and `PersonaPlexManager`. Orchestrates full-duplex streaming, in-process model inference, and reflexive verbal fillers.
+- **Sensory Agent**: Maintains the `RollingAudioBuffer` (auditory memory) and provides tools like `inspect_audio_snippet` for multi-modal context analysis.
+- **Reasoning Agent**: Oversees multi-phase processing (Notes, Planning, Execution, Digesting, Validating, Responding) using Gemma-3n. Ensures conversation history strictly alternates roles.
+- **UI Agent**: Manages the TUI with enhanced navigation: Up/Down for input history, PgUp/PgDn for log scrolling, and Left/Right for cursor editing.
+- **Logging Agent**: Ensures a unified log schema via `InteractionLogManager`, facilitating accurate summaries by the `EventCompressor`.
 
 ## Tools Available
 
-- **Model Inference**: Configurable backends: `llama_cpp` GGUF models and `transformers` models (e.g., `gpt-oss`) from HF cache; PersonaPlex (via moshi) for audio processing.
-- **Logging**: Async logging to files and stderr; in-memory log management with locking.
-- **Indexing**: Keyword-based search and context retrieval from interaction history.
-- **Event Scheduling**: Async queue for deferred tasks and timed events.
-- **Audio Handling**: Speech-to-speech via PersonaPlex offline mode with continuous loop support; Opus for compression.
-- **TUI Controls**: Curses-based interface for real-time display and input.
-- **File Management**: JSONL logs, compressed logs, index files, configuration constants.
-- **Environment**: `.env` for optional `HF_TOKEN`; HF cache for model artifacts; PATH for Opus binaries; GPU monitoring.
+- **Model Inference**: Gemma-3n (multi-modal transformer) and legacy llama.cpp backends. `PersonaPlexManager` keeps audio models warm in VRAM for rapid response.
+- **Auditory Backbone**: `AudioMultiplexer` for broadcast mic capture and `RollingAudioBuffer` for 10s sensory memory.
+- **TUI Controls**: Curses-based interface with `/wake`, `/sleep`, and real-time processing phase visibility.
+- **Shutdown Watchdog**: 10-second hard-kill watchdog ensuring reliable process termination.
 
 ## Interaction Protocols
 
-- **Communication**: Use structured messages with role prefixes (e.g., "[Audio Agent] Processing voice input"). Reference file paths and line numbers for code changes.
-- **Task Breakdown**: Decompose complex tasks into phases: Discovery (research), Alignment (plan), Design (draft), Refinement (revise), Implementation (code), Verification (test).
-- **Commit Protocol**: Commit frequently with detailed messages (e.g., "Integrate PersonaPlex STT in utils.py"). Push to branch `multiple_files` for collaboration.
-- **Error Handling**: Log errors with context; retry failed operations up to 3 times; escalate to human if critical.
-- **Autonomous Mode**: During active hours, generate thoughts independently; respect sleep hours (11 PM - 7 AM) for minimal activity.
-- **PersonaPlex Integration**: Use voice prompts (e.g., NATF2.pt) and text prompts for consistent personas. Default runtime uses `agent-bot/.venv` Python and offline continuous voice mode.
-- **Model Controls**: Use `/model`, `/model list`, `/model use <alias>` for runtime model operations; keep `config.py` model aliases current.
-- **Runtime Diagnostics**: Use `/llm-status`, `/llm-diagnose`, and `/voice-diagnose` for fast health checks. Use `/force-quit` or second `Ctrl+C` to hard-stop stuck shutdowns.
-- **State Tracking**: Maintain awareness of unprocessed interactions, ongoing thoughts, and next events. Update state after each action.
+- **Communication**: Use role prefixes and reference the current processing phase (e.g., "[Reasoning Agent] Phase: Planning").
+- **Handoff Logic**: Priority 1: Trigger reflexive filler. Priority 2: Multi-phase background reasoning. Priority 3: Final spoken response.
+- **Context Management**: Explicitly alternate 'user' and 'assistant' roles in `llm_context` to comply with Gemma-3n constraints.
+- **State Tracking**: Monitor `manual_wake` status and "Next event" time-tracking for autonomous operations.
 
 ## Guidelines
 
@@ -46,16 +35,16 @@ This document outlines the roles, tools, protocols, and guidelines for AI agents
 
 ## PersonaPlex Specifics
 
-- **Voices**: Use NAT (natural) or VAR (variety) embeddings for consistency.
-- **Prompts**: Text-based for roles (e.g., "You are a wise assistant."); audio-based for voice conditioning.
-- **Modes**: Offline continuous mode is the primary runtime path for terminal operation.
-- **Dependencies**: Ensure moshi installed; Opus codec available.
+- **Manager**: Use `PersonaPlexManager` for in-process inference. Avoid subprocess calls unless debugging.
+- **Voices**: Default to `NATF2.pt` for natural conversational tone.
+- **Modes**: Full-duplex streaming is the primary runtime path. Audio is processed in real-time chunks via the `AudioMultiplexer`.
 
 ## Project Skills
 
-- **voice-loop-debug** (`.github/skills/voice-loop-debug/SKILL.md`): Triage silent/offline continuous voice-loop behavior, queue drain issues, and debug-screen visibility.
-- **model-load-triage** (`.github/skills/model-load-triage/SKILL.md`): Isolate fetching vs loading delays, offload-folder errors, and model diagnose timeouts.
-- **shutdown-recovery** (`.github/skills/shutdown-recovery/SKILL.md`): Handle stuck shutdowns with bounded graceful stop and force-quit/process-tree kill flows.
-- **env-cuda-alignment** (`.github/skills/env-cuda-alignment/SKILL.md`): Keep app and voice on one `.venv` and verify CUDA-capable torch runtime.
+- **voice-loop-debug** (`.github/skills/voice-loop-debug/SKILL.md`): Triage streaming latency, VAD sensitivity, and in-process inference failures.
+- **model-load-triage** (`.github/skills/model-load-triage/SKILL.md`): Monitor HF blob downloads and VRAM offload behavior for Gemma-3n.
+- **shutdown-recovery** (`.github/skills/shutdown-recovery/SKILL.md`): Handle the 10s watchdog triggers and ensure the capture thread terminates.
+- **env-cuda-alignment** (`.github/skills/env-cuda-alignment/SKILL.md`): Verify bfloat16 compatibility and `moshi` package visibility.
+- **multi-modal-diagnose**: Verify `AutoProcessor` state and audio-tool feedback loops.
 
 Agents should operate autonomously while coordinating for seamless development.

@@ -5,38 +5,37 @@ description: Diagnose offline continuous voice loop issues in agent-bot, especia
 
 # Voice Loop Debug
 
-Use this skill when the app shows voice loop running but user sees no response.
+Use this skill when the app shows voice loop running but user sees no response or transcription.
 
 ## Quick Checks
 
 1. Confirm runtime status from UI commands:
    - `/voice-status`
-   - `/voice-diagnose`
+   - `/voice-diagnose` (ensure `moshi` is available)
    - `/llm-status`
 2. Capture key fields:
-   - voice mode/activity (`listening`, `thinking`, `error`)
+   - voice mode/activity (`listening`, `Model: ...` thinking state)
    - `unprocessed` count trend
-   - llm `processing` flag and `last_error`
-3. Verify Esc debug view is populated (not blank). If blank, inspect TUI debug render path first.
+   - llm `processing` flag and `processing_phase`
+3. Verify Esc debug view is populated with `phase` and `voice` state.
 
 ## Triage Flow
 
-1. If voice loop is `running` and `listening` but no replies:
-   - Submit typed input and observe whether `unprocessed` decreases.
-   - If it does not decrease, inspect interaction processor + queue handoff.
-2. If state flips to `processing utterance` and stalls:
-   - Run `/llm-diagnose` and inspect timeout/error path.
-   - Check model backend and current alias for overload/offload behavior.
+1. If voice loop is `running` but no transcription appears:
+   - Check `AudioMultiplexer` log for "starting capture thread".
+   - Confirm `StreamingSession` is created and `start()` completes.
+2. If state stalls on `processing utterance`:
+   - Inspect `PersonaPlexManager` logs for in-process inference completion.
+   - Verify `playback_interrupt` isn't stuck.
 3. If `voice loop activity=error`:
-   - Surface the full stderr cause (avoid truncation in status line).
-   - Reproduce once with deterministic text input before touching audio.
+   - Surface the full stderr cause.
+   - Check if `subprocess` fallback was triggered and if it timed out.
 
 ## File Touchpoints
 
 - `voice_loop.py`
+- `utils.py` (PersonaPlexManager, AudioMultiplexer)
 - `interaction_processor.py`
-- `tui_renderer.py`
-- `simple_renderer.py`
 
 ## Fix Patterns
 
