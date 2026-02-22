@@ -203,8 +203,8 @@ class PersonaPlexStreamingSession:
                     self.all_text_tokens.append(piece)
                     new_texts.append(piece)
                 
-                # Decode audio tokens
-                out_pcm = self.manager.other_mimi.decode(tokens[:, 1:])
+                # Decode audio tokens (k=1..dep_q+1)
+                out_pcm = self.manager.other_mimi.decode(tokens[:, 1 : self.manager.lm.dep_q + 1])
                 all_out_pcms.append(out_pcm.cpu().detach().numpy().squeeze())
             
             final_audio = np.concatenate(all_out_pcms) if all_out_pcms else None
@@ -443,8 +443,9 @@ class PersonaPlexManager:
                 if text_token not in {0, 1, 2, 3}: # Skip BOS/EOS/PAD
                     all_text_tokens.append(self.text_tokenizer.IdToPiece(text_token))
 
-                # Decode agent tokens (k=1..dep_q)
-                out_pcm = self.other_mimi.decode(tokens[:, 1:])
+                # Decode agent tokens (k=1..dep_q+1)
+                # dep_q is the number of audio codebooks
+                out_pcm = self.other_mimi.decode(tokens[:, 1 : self.lm.dep_q + 1])
                 all_out_pcms.append(out_pcm.cpu().detach().numpy().squeeze())
             
             if all_out_pcms:
