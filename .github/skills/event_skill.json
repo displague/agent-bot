@@ -1,0 +1,13 @@
+{
+  "name": "event_schedule",
+  "description": "Schedules and manages asynchronous events like reminders, lookups, or training tasks.",
+  "parameters": {
+    "event_type": "Type of event (reminder, lookup, rag_completion, training)",
+    "description": "Description of the event",
+    "delay_seconds": "Delay in seconds before execution (optional)",
+    "data": "Additional data for the event (e.g., query for lookup)"
+  },
+  "output": "Event ID for tracking",
+  "dependencies": ["asyncio", "queue"],
+  "usage": "Used in event_scheduler.py; supports deferred processing and autonomous actions."
+}

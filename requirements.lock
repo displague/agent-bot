@@ -1,0 +1,74 @@
+accelerate==1.12.0
+aiohappyeyeballs==2.6.1 # indirect
+aiohttp==3.10.11
+aiosignal==1.4.0 # indirect
+annotated-doc==0.0.4 # indirect
+anyio==4.12.1 # indirect
+attrs==25.4.0 # indirect
+bitsandbytes==0.49.2
+certifi==2026.1.4 # indirect
+cffi==2.0.0 # indirect
+charset-normalizer==3.4.4 # indirect
+click==8.3.1 # indirect
+colorama==0.4.6 # indirect
+diskcache==5.6.3 # indirect
+einops==0.7.0 # indirect
+filelock==3.24.3 # indirect
+frozenlist==1.8.0 # indirect
+fsspec==2026.2.0 # indirect
+h11==0.16.0 # indirect
+hf-xet==1.2.0 # indirect
+httpcore==1.0.9 # indirect
+httpx==0.28.1 # indirect
+huggingface-hub==1.4.1
+idna==3.11 # indirect
+iniconfig==2.3.0 # indirect
+jinja2==3.1.6 # indirect
+llama-cpp-python==0.3.16
+markdown-it-py==4.0.0 # indirect
+markupsafe==3.0.3 # indirect
+mdurl==0.1.2 # indirect
+mpmath==1.3.0 # indirect
+mss==10.1.0
+multidict==6.7.1 # indirect
+networkx==3.6.1 # indirect
+numpy==2.4.2
+packaging==26.0 # indirect
+pillow==12.0.0
+pluggy==1.6.0 # indirect
+propcache==0.4.1 # indirect
+psutil==7.2.2 # indirect
+pycparser==3.0 # indirect
+pygments==2.19.2 # indirect
+pytest==9.0.2
+pytest-asyncio==1.3.0
+pytest-timeout==2.4.0
+python-dotenv==1.2.1
+pyttsx3==2.99
+pyyaml==6.0.3 # indirect
+regex==2026.2.19 # indirect
+requests==2.32.5 # indirect
+rich==14.3.3 # indirect
+safetensors==0.4.5 # indirect
+sentencepiece==0.2.0
+setuptools==82.0.0 # indirect
+shellingham==1.5.4 # indirect
+sounddevice==0.5.0
+soundfile==0.13.1
+sphn==0.1.12
+sympy==1.14.0 # indirect
+timm==1.0.24 # indirect
+tokenizers==0.22.2 # indirect
+torch==2.10.0+cu130
+torchaudio==2.10.0+cu130
+torchvision==0.25.0+cu130
+triton-windows==3.6.0.post25
+tqdm==4.67.3 # indirect
+transformers==5.2.0
+typer==0.24.1 # indirect
+typer-slim==0.24.0 # indirect
+typing-extensions==4.15.0 # indirect
+urllib3==2.6.3 # indirect
+windows-curses==2.4.1
+yarl==1.22.0 # indirect
+moshi @ git+https://github.com/NVIDIA/personaplex.git#subdirectory=moshi
