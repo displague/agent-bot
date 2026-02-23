@@ -52,23 +52,66 @@ sentencepiece = None
 logger = logging.getLogger("autonomous_system.utils")
 
 
+_voice_prompt_cache: dict = {}
+
+
+def _streaming_state_to_cpu(state):
+    """Recursively clone a streaming state dict/dataclass, moving tensors to CPU RAM."""
+    import copy
+    from dataclasses import fields, is_dataclass
+    if isinstance(state, torch.Tensor):
+        return state.detach().cpu().clone()
+    if is_dataclass(state) and not isinstance(state, type):
+        new = copy.copy(state)  # shallow copy of the dataclass shell
+        for f in fields(state):
+            setattr(new, f.name, _streaming_state_to_cpu(getattr(state, f.name)))
+        return new
+    if isinstance(state, dict):
+        return {k: _streaming_state_to_cpu(v) for k, v in state.items()}
+    if isinstance(state, list):
+        return [_streaming_state_to_cpu(v) for v in state]
+    return copy.copy(state)  # primitives / None
+
+
+def _streaming_state_to_device(state, device):
+    """Recursively clone a CPU streaming state, moving tensors to *device*."""
+    import copy
+    from dataclasses import fields, is_dataclass
+    if isinstance(state, torch.Tensor):
+        return state.to(device, non_blocking=True).clone()
+    if is_dataclass(state) and not isinstance(state, type):
+        new = copy.copy(state)
+        for f in fields(state):
+            setattr(new, f.name, _streaming_state_to_device(getattr(state, f.name), device))
+        return new
+    if isinstance(state, dict):
+        return {k: _streaming_state_to_device(v, device) for k, v in state.items()}
+    if isinstance(state, list):
+        return [_streaming_state_to_device(v, device) for v in state]
+    return copy.copy(state)
+
+
 def _ensure_voice_prompt_exists(voice_name: str, repo_id: str = "nvidia/personaplex-7b-v1") -> str:
     """Ensure the voice prompt exists locally, downloading from HF if needed."""
+    if voice_name in _voice_prompt_cache:
+        return _voice_prompt_cache[voice_name]
+
     from huggingface_hub import hf_hub_download, list_repo_files
     import tarfile
 
     # If it's an absolute path and exists, use it
     v_path = Path(voice_name)
     if v_path.is_absolute() and v_path.exists():
+        _voice_prompt_cache[voice_name] = str(v_path)
         return str(v_path)
 
-    # Check common local locations
+    # Check common local locations — voices/ first to avoid walking the whole tree
     project_root = Path(__file__).parent.absolute()
     v_dir = PERSONAPLEX_VOICE_PROMPT_DIR.strip()
     
-    local_search_dirs = [Path("."), project_root / "voices", project_root / "personaplex"]
+    local_search_dirs = [project_root / "voices", project_root / "personaplex", Path(".")]
     if v_dir:
-        local_search_dirs.append(Path(v_dir))
+        local_search_dirs.insert(0, Path(v_dir))
         
     for search_dir in local_search_dirs:
         if not search_dir.exists():
@@ -78,6 +121,7 @@ def _ensure_voice_prompt_exists(voice_name: str, repo_id: str = "nvidia/personap
             if voice_name in files:
                 found_path = str(Path(root) / voice_name)
                 logger.debug("Found voice prompt locally at: %s", found_path)
+                _voice_prompt_cache[voice_name] = found_path
                 return found_path
 
     # Not found locally, attempt HF download
@@ -85,9 +129,13 @@ def _ensure_voice_prompt_exists(voice_name: str, repo_id: str = "nvidia/personap
     try:
         files = list_repo_files(repo_id=repo_id)
         if voice_name in files:
-            return hf_hub_download(repo_id=repo_id, filename=voice_name)
+            result = hf_hub_download(repo_id=repo_id, filename=voice_name)
+            _voice_prompt_cache[voice_name] = result
+            return result
         if f"voices/{voice_name}" in files:
-            return hf_hub_download(repo_id=repo_id, filename=f"voices/{voice_name}")
+            result = hf_hub_download(repo_id=repo_id, filename=f"voices/{voice_name}")
+            _voice_prompt_cache[voice_name] = result
+            return result
         
         # Fallback to voices.tgz
         if "voices.tgz" in files:
@@ -102,7 +150,9 @@ def _ensure_voice_prompt_exists(voice_name: str, repo_id: str = "nvidia/personap
             # Find it in extracted dir
             for root, _, files in os.walk(extract_dir):
                 if voice_name in files:
-                    return str(Path(root) / voice_name)
+                    result = str(Path(root) / voice_name)
+                    _voice_prompt_cache[voice_name] = result
+                    return result
     except Exception as e:
         logger.error("Failed to download voice prompt from HF: %s", e)
     
@@ -210,6 +260,10 @@ class PersonaPlexManager:
         # the lm_gen is ready for inference without re-running setup.
         self._primed = False
         self._primed_for: Optional[tuple] = None  # (voice_prompt_path, text_prompt)
+        # Saved LMGen streaming state (KV cache) after step_system_prompts so
+        # each call can restore it in milliseconds instead of re-running setup.
+        self._lm_primed_state = None
+        self._optimizations_applied = False
         # Dedicated executor for sequential, low-jitter inference
         from concurrent.futures import ThreadPoolExecutor
         self.step_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="personaplex_step")
@@ -230,6 +284,9 @@ class PersonaPlexManager:
 
     def _apply_optimizations(self):
         """Apply torch.compile and CUDA graph optimizations based on config."""
+        if self._optimizations_applied:
+            return
+        self._optimizations_applied = True
         opt = PERSONAPLEX_OPTIMIZE.lower()
         
         # 1. Set environment variables based on strategy
@@ -300,6 +357,42 @@ class PersonaPlexManager:
             logger.info("PersonaPlexManager: patched moshi CUDAGraphed.")
         except Exception as e:
             logger.warning("PersonaPlexManager: failed to patch moshi CUDA graphs: %s", e)
+
+    def _save_primed_state(self):
+        """Snapshot the lm_gen streaming state after step_system_prompts.
+
+        Tensors are moved to CPU RAM so the full VRAM stays available for
+        inference. Restoring clones them back to GPU on demand.
+        Must be called inside self._lock.
+        """
+        try:
+            raw = self.lm_gen.get_streaming_state()
+            self._lm_primed_state = _streaming_state_to_cpu(raw)
+            logger.debug("PersonaPlexManager: saved primed lm_gen streaming state (CPU).")
+        except Exception as e:
+            logger.warning("PersonaPlexManager: could not save primed state: %s", e)
+            self._lm_primed_state = None
+
+    def _restore_primed_state(self) -> bool:
+        """Restore lm_gen to the voice-prompt-primed state instantly.
+
+        Returns True if state was restored (no step_system_prompts needed),
+        False if _lm_primed_state is not yet available.
+        Must be called inside self._lock.
+        """
+        if self._lm_primed_state is None:
+            return False
+        try:
+            gpu_state = _streaming_state_to_device(self._lm_primed_state, self.device)
+            self.lm_gen.set_streaming_state(gpu_state)
+            self.mimi.reset_streaming()
+            self.other_mimi.reset_streaming()
+            logger.info("PersonaPlexManager: restored pre-warmed lm_gen state (no step_system_prompts needed).")
+            return True
+        except Exception as e:
+            logger.warning("PersonaPlexManager: state restore failed, will re-run step_system_prompts: %s", e)
+            self._lm_primed_state = None
+            return False
 
     def load(self):
         """Load models into VRAM if not already loaded."""
@@ -412,6 +505,7 @@ class PersonaPlexManager:
                     self.mimi.reset_streaming()  # Reset mimi encode state (matches offline.py behavior)
                     self._primed = True
                     self._primed_for = voice_prompt_path  # Only voice identity matters for primed check
+                    self._save_primed_state()  # Snapshot KV cache for fast restore on every call
                     self._status("PersonaPlexManager: voice prompt warmed up and ready.")
                 except Exception as warm_err:
                     logger.warning("PersonaPlexManager: voice prompt warmup failed (will warm on first inference): %s", warm_err)
@@ -451,16 +545,9 @@ class PersonaPlexManager:
         final_voice_prompt = _ensure_voice_prompt_exists(voice_prompt_path)
 
         with self._lock:
-            # If the model was pre-warmed with exactly these prompts, skip the
-            # expensive reset+step_system_prompts (saves ~26s on first call).
-            # step_system_prompts processes the voice identity (speaker style).
-            # text_prompt_tokens (the utterance) can be updated without re-running it.
-            # Only compare voice_prompt_path for primed state match.
-            if self._primed and self._primed_for == voice_prompt_path:
-                self._primed = False  # Consume the primed state
-                # Update utterance tokens — no need to re-run step_system_prompts.
+            if self._restore_primed_state():
+                # KV cache restored; just update utterance tokens
                 self.lm_gen.text_prompt_tokens = self.text_tokenizer.encode(wrap_with_system_tags(final_text_prompt))
-                logger.info("PersonaPlexManager: using pre-warmed voice prompt state.")
             else:
                 # Full setup: load prompts, reset streaming state, run warmup
                 if final_voice_prompt.endswith('.pt'):
@@ -473,6 +560,7 @@ class PersonaPlexManager:
                 self.lm_gen.reset_streaming()
                 self.lm_gen.step_system_prompts(self.mimi)
                 self.mimi.reset_streaming()  # Reset mimi encode state (matches offline.py behavior)
+                self._save_primed_state()
             
             # Process input WAV
             input_data, _ = sf.read(input_wav_path, dtype="float32")
@@ -514,10 +602,10 @@ class PersonaPlexManager:
         final_voice_prompt = _ensure_voice_prompt_exists(voice_prompt_path)
 
         with self._lock:
-            if self._primed and self._primed_for == voice_prompt_path:
-                self._primed = False
-                logger.info("PersonaPlexManager: tts_stream using pre-warmed voice prompt state.")
+            if self._restore_primed_state():
+                pass  # KV cache restored; mimi/other_mimi already reset inside helper
             else:
+                # First call or restore failed: run full setup then save state for next time
                 if final_voice_prompt.endswith('.pt'):
                     self.lm_gen.load_voice_prompt_embeddings(final_voice_prompt)
                 else:
@@ -527,6 +615,7 @@ class PersonaPlexManager:
                 self.lm_gen.reset_streaming()
                 self.lm_gen.step_system_prompts(self.mimi)
                 self.mimi.reset_streaming()
+                self._save_primed_state()
 
             # Encode the text WITHOUT system tags — these are the words to speak
             text_tokens = self.text_tokenizer.encode(text)
@@ -579,12 +668,8 @@ class PersonaPlexManager:
         logger.debug("PersonaPlexManager: using voice prompt path: %s", final_voice_prompt)
 
         with self._lock:
-            # step_system_prompts processes the voice identity only.
-            # text_prompt_tokens (utterance) can be updated independently.
-            # Only compare voice_prompt_path for primed state match.
-            if self._primed and self._primed_for == voice_prompt_path:
-                self._primed = False  # Consume the primed state
-                logger.info("PersonaPlexManager: using pre-warmed voice prompt state.")
+            if self._restore_primed_state():
+                # KV cache restored; just update utterance tokens
                 self.lm_gen.text_prompt_tokens = self.text_tokenizer.encode(wrap_with_system_tags(final_text_prompt))
                 if PERSONAPLEX_USE_CUDA_GRAPHS:
                     frame_size = int(self.mimi.sample_rate / self.mimi.frame_rate)
@@ -604,6 +689,7 @@ class PersonaPlexManager:
                 self.lm_gen.reset_streaming()
                 self.lm_gen.step_system_prompts(self.mimi)
                 self.mimi.reset_streaming()  # Reset mimi encode state (matches offline.py behavior)
+                self._save_primed_state()
             
             # Process input WAV
             import soundfile as sf
