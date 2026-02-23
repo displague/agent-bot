@@ -652,6 +652,41 @@ class PersonaPlexManager:
             
             return output_wav_path
 
+    def hear_stream(self, heard_text: str, voice_prompt_path: str):
+        """Conversational inference: synthesise *heard_text* as user speech,
+        feed it to PersonaPlex, and yield PCM frames of the agent's spoken reply.
+
+        Unlike tts_stream (which teacher-forces the LM to say specific words),
+        this uses the full conversational path: the model *hears* the user
+        speaking and generates its natural response in the PersonaPlex voice.
+
+        Yields numpy float32 arrays (one per mimi frame, 1920 samples @ 24 kHz).
+        """
+        import tempfile as _tempfile
+
+        with _tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as _f:
+            user_wav = _f.name
+        with _tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as _f:
+            agent_wav = _f.name
+        try:
+            text_to_wav(heard_text, user_wav, sample_rate=int(self.mimi.sample_rate))
+            self.infer(
+                text_prompt=PERSONAPLEX_TEXT_PROMPT,
+                voice_prompt_path=voice_prompt_path,
+                input_wav_path=user_wav,
+                output_wav_path=agent_wav,
+            )
+            if os.path.exists(agent_wav):
+                data, _ = sf.read(agent_wav, dtype="float32")
+                # Yield frame-sized chunks matching mimi's output stride
+                frame = int(self.mimi.sample_rate / self.mimi.frame_rate)
+                for i in range(0, len(data), frame):
+                    yield data[i : i + frame].astype(np.float32)
+        finally:
+            for p in (user_wav, agent_wav):
+                if os.path.exists(p):
+                    os.unlink(p)
+
 
 class AudioMultiplexer:
     """Captures microphone audio and broadcasts chunks to multiple subscribers."""
@@ -856,6 +891,40 @@ class DebugServer:
         finally:
             writer.close()
             await writer.wait_closed()
+
+
+def text_to_wav(text: str, path: str, sample_rate: int = 24000) -> None:
+    """Generate speech for *text* and save to *path* as a mono WAV at *sample_rate* Hz.
+
+    Uses pyttsx3 (cross-platform: SAPI on Windows, espeak on Linux,
+    NSSpeechSynthesizer on macOS) for offline synthesis, then resamples to the
+    target rate via torchaudio so output is compatible with the moshi/mimi codec.
+    """
+    import pyttsx3, torchaudio, torch as _torch, tempfile as _tempfile
+
+    # pyttsx3 saves at the system TTS native rate; write to a temp file first
+    with _tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as _f:
+        tmp = _f.name
+    try:
+        engine = pyttsx3.init()
+        engine.save_to_file(text, tmp)
+        engine.runAndWait()
+
+        # Load with soundfile (works without torchcodec), resample via torchaudio
+        data, sr = sf.read(tmp, dtype="float32", always_2d=False)
+        wav = _torch.from_numpy(data)
+        if wav.ndim == 1:
+            wav = wav.unsqueeze(0)  # [1, T]
+        elif wav.ndim == 2:
+            wav = wav.T  # [C, T]
+        if wav.shape[0] > 1:
+            wav = wav.mean(0, keepdim=True)
+        if sr != sample_rate:
+            wav = torchaudio.functional.resample(wav, sr, sample_rate)
+        sf.write(path, wav.squeeze(0).numpy().astype(np.float32), sample_rate)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
 
 
 def play_wav_file_interruptible(path: str, stop_event: Optional[threading.Event] = None) -> bool:

@@ -323,6 +323,27 @@ class SimpleRenderer:
             print(f"Injecting voice response: {text}")
             self.interaction_queue.put_nowait({"input": "[Direct Injection]", "audio_waveform": None, "override_response": text})
             return
+        if cmd.startswith("/voice-hear "):
+            text = raw[12:].strip()
+            if not text:
+                return
+            print(f"Injecting heard speech: {text}")
+            pm = (getattr(self.interaction_processor, "personaplex_manager", None)
+                  or getattr(self._voice_loop, "personaplex_manager", None))
+            vl = self._voice_loop
+            if pm and vl:
+                async def _do_hear():
+                    chunks = await asyncio.to_thread(
+                        list, pm.hear_stream(text, pm._primed_for or "")
+                    )
+                    if chunks:
+                        import numpy as _np
+                        audio = _np.concatenate([c for c in chunks if c.size > 0]).astype(_np.float32)
+                        await vl.say_audio(audio)
+                asyncio.create_task(_do_hear())
+            else:
+                print("/voice-hear requires PersonaPlex + VoiceLoop")
+            return
         if cmd.startswith("/set-persona "):
             new_persona = raw[13:].strip()
             if not new_persona:

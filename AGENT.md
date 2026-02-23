@@ -40,6 +40,21 @@ This document outlines the roles, tools, protocols, and guidelines for AI agents
 - **Manager**: Use `PersonaPlexManager` for in-process inference. Avoid subprocess calls unless debugging.
 - **Voices**: Default to `NATF2.pt` for natural conversational tone.
 - **Modes**: Full-duplex streaming is the primary runtime path. Audio is processed in real-time chunks via the `AudioMultiplexer`.
+- **TTS bypass** (`tts_stream`): Teacher-forces text tokens so the depformer samples audio autoregressively — fast, deterministic speech without a conversational exchange.
+- **Conversational path** (`hear_stream`): Generates pyttsx3 TTS audio of the "heard" text, feeds it to `infer()`, and yields the model's natural spoken reply. Use this when you want PersonaPlex's genuine conversational voice.
+- **Voice primer**: `voices/introduce-yourself.wav` — a 24 kHz WAV of "Please introduce yourself." ready to feed to `hear_stream` or `infer`.
+
+## Debug Commands (port 9999 + TUI)
+
+Send JSON lines to port 9999: `{"type": "command", "data": "/voice-say Hello world"}`
+
+| Command | Description |
+|---|---|
+| `/voice-say <text>` | Inject text as an `override_response`; spoken via `tts_stream` (bypass path). |
+| `/voice-hear <text>` | Synthesise text as user speech via pyttsx3, feed to PersonaPlex conversationally, play agent reply. |
+| `/voice-diagnose` | Print python path, torch/CUDA info. |
+| `/voice-start` / `/voice-stop` | Start/stop the offline continuous voice loop. |
+| `/set-persona <text>` | Update `PERSONAPLEX_TEXT_PROMPT` at runtime. |
 
 ## Project Skills
 
