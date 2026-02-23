@@ -123,46 +123,33 @@ class PersonaPlexStreamingSession:
         self._is_ready = False
 
     def start(self):
-        """Initialize the session: load models, run warmup, and step system prompts."""
-        from moshi.offline import warmup, wrap_with_system_tags
-        import moshi.models.lm
+        """Initialize the session by resetting the manager's warm lm_gen state.
         
-        # Patch CUDAGraphed based on manager's optimization strategy
+        Creating a new LMGen that wraps the already-streaming manager.lm breaks
+        step_system_prompts (depformer.is_streaming assertion). Instead, reuse
+        manager.lm_gen directly — reset_streaming + step_system_prompts works
+        on it, as proven by load() pre-warm and infer_stream().
+        """
+        from moshi.offline import wrap_with_system_tags
+        
         self.manager._apply_optimizations()
-        
         self.manager.load()
         
-        # Resolve voice prompt path
         final_voice_prompt = _ensure_voice_prompt_exists(self.voice_prompt_path)
 
-        with self._lock:
-            self.lm_gen = LMGen(
-                self.manager.lm,
-                audio_silence_frame_cnt=int(0.5 * self.manager.mimi.frame_rate),
-                sample_rate=self.manager.mimi.sample_rate,
-                device=self.manager.device,
-                frame_rate=self.manager.mimi.frame_rate,
-                save_voice_prompt_embeddings=False,
-                use_sampling=True,
-                temp=0.8,
-                temp_text=0.7,
-                top_k=1,
-                top_k_text=1,
-            )
-            self.lm_gen.streaming_forever(1)
+        with self.manager._lock:
+            # Reuse the manager's warm lm_gen rather than creating a new one.
+            self.lm_gen = self.manager.lm_gen
             self.frame_size = int(self.manager.mimi.sample_rate / self.manager.mimi.frame_rate)
-            
-            if PERSONAPLEX_USE_CUDA_GRAPHS:
-                self.manager._status("PersonaPlexManager: warming up CUDA graphs...")
-                warmup(self.manager.mimi, self.manager.other_mimi, self.lm_gen, self.manager.device, self.frame_size)
-            
+
+            # Load voice/text prompts and reset streaming state (same path as infer_stream).
             if final_voice_prompt.endswith('.pt'):
                 self.lm_gen.load_voice_prompt_embeddings(final_voice_prompt)
             else:
                 self.lm_gen.load_voice_prompt(final_voice_prompt)
-            
-            self.lm_gen.text_prompt_tokens = self.manager.text_tokenizer.encode(wrap_with_system_tags(self.text_prompt))
-            
+            self.lm_gen.text_prompt_tokens = self.manager.text_tokenizer.encode(
+                wrap_with_system_tags(self.text_prompt)
+            )
             self.manager.mimi.reset_streaming()
             self.manager.other_mimi.reset_streaming()
             self.lm_gen.reset_streaming()
@@ -170,36 +157,32 @@ class PersonaPlexStreamingSession:
             self._is_ready = True
 
     def step(self, audio_chunk: np.ndarray) -> Tuple[Optional[np.ndarray], Optional[str]]:
-        """Process a single audio chunk and return generated audio and text (if any).."""
+        """Process a single audio chunk and return generated audio and text (if any)."""
         if not self._is_ready:
             self.start()
             
-        with self._lock:
+        # Use manager._lock so step() is mutually exclusive with infer_stream/infer.
+        with self.manager._lock:
             all_out_pcms = []
             new_texts = []
             
-            # Process the chunk in frame_size increments
             for i in range(0, len(audio_chunk), self.frame_size):
                 sub_chunk = audio_chunk[i : i + self.frame_size]
                 if len(sub_chunk) < self.frame_size:
                     sub_chunk = np.pad(sub_chunk, (0, self.frame_size - len(sub_chunk)))
                 
-                # Ensure contiguous for torch.from_numpy
                 sub_chunk = np.ascontiguousarray(sub_chunk)
                 chunk_ts = torch.from_numpy(sub_chunk).to(self.manager.device).unsqueeze(0).unsqueeze(0)
                 codes = self.manager.mimi.encode(chunk_ts)
                 
-                # Model step
                 tokens = self.lm_gen.step(codes)
                 
-                # Decode text token
                 text_token = tokens[0, 0].item()
                 if text_token not in {0, 1, 2, 3}:
                     piece = self.manager.text_tokenizer.IdToPiece(text_token)
                     self.all_text_tokens.append(piece)
                     new_texts.append(piece)
                 
-                # Decode audio tokens (k=1..dep_q+1)
                 out_pcm = self.manager.other_mimi.decode(tokens[:, 1 : self.manager.lm.dep_q + 1])
                 all_out_pcms.append(out_pcm.cpu().detach().numpy().squeeze())
             
@@ -223,6 +206,10 @@ class PersonaPlexManager:
         self.text_tokenizer = None
         self.repo = "nvidia/personaplex-7b-v1"
         self._lock = threading.Lock()
+        # Primed-state tracking: True when step_system_prompts has been run and
+        # the lm_gen is ready for inference without re-running setup.
+        self._primed = False
+        self._primed_for: Optional[tuple] = None  # (voice_prompt_path, text_prompt)
         # Dedicated executor for sequential, low-jitter inference
         from concurrent.futures import ThreadPoolExecutor
         self.step_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="personaplex_step")
@@ -404,6 +391,31 @@ class PersonaPlexManager:
                 self.lm_gen.streaming_forever(1)
                 
                 self._status("PersonaPlexManager: models and warm generator loaded and ready.")
+                
+                # Pre-warm voice prompt so the first inference skips the 26s setup.
+                try:
+                    from moshi.offline import wrap_with_system_tags
+                    self._status("PersonaPlexManager: warming up voice prompt (first inference will be instant)...")
+                    voice_prompt_path = PERSONAPLEX_VOICE_PROMPT
+                    final_voice_prompt = _ensure_voice_prompt_exists(voice_prompt_path)
+                    if final_voice_prompt.endswith('.pt'):
+                        self.lm_gen.load_voice_prompt_embeddings(final_voice_prompt)
+                    else:
+                        self.lm_gen.load_voice_prompt(final_voice_prompt)
+                    self.lm_gen.text_prompt_tokens = self.text_tokenizer.encode(
+                        wrap_with_system_tags(PERSONAPLEX_TEXT_PROMPT)
+                    )
+                    self.mimi.reset_streaming()
+                    self.other_mimi.reset_streaming()
+                    self.lm_gen.reset_streaming()
+                    self.lm_gen.step_system_prompts(self.mimi)
+                    self.mimi.reset_streaming()  # Reset mimi encode state (matches offline.py behavior)
+                    self._primed = True
+                    self._primed_for = voice_prompt_path  # Only voice identity matters for primed check
+                    self._status("PersonaPlexManager: voice prompt warmed up and ready.")
+                except Exception as warm_err:
+                    logger.warning("PersonaPlexManager: voice prompt warmup failed (will warm on first inference): %s", warm_err)
+                    self._primed = False
             except Exception as e:
                 logger.exception("PersonaPlexManager: failed to load models: %s", e)
                 raise
@@ -439,18 +451,28 @@ class PersonaPlexManager:
         final_voice_prompt = _ensure_voice_prompt_exists(voice_prompt_path)
 
         with self._lock:
-            # Load prompts and reset state
-            if final_voice_prompt.endswith('.pt'):
-                self.lm_gen.load_voice_prompt_embeddings(final_voice_prompt)
+            # If the model was pre-warmed with exactly these prompts, skip the
+            # expensive reset+step_system_prompts (saves ~26s on first call).
+            # step_system_prompts processes the voice identity (speaker style).
+            # text_prompt_tokens (the utterance) can be updated without re-running it.
+            # Only compare voice_prompt_path for primed state match.
+            if self._primed and self._primed_for == voice_prompt_path:
+                self._primed = False  # Consume the primed state
+                # Update utterance tokens — no need to re-run step_system_prompts.
+                self.lm_gen.text_prompt_tokens = self.text_tokenizer.encode(wrap_with_system_tags(final_text_prompt))
+                logger.info("PersonaPlexManager: using pre-warmed voice prompt state.")
             else:
-                self.lm_gen.load_voice_prompt(final_voice_prompt)
-            
-            self.lm_gen.text_prompt_tokens = self.text_tokenizer.encode(wrap_with_system_tags(final_text_prompt))
-            
-            self.mimi.reset_streaming()
-            self.other_mimi.reset_streaming()
-            self.lm_gen.reset_streaming()
-            self.lm_gen.step_system_prompts(self.mimi)
+                # Full setup: load prompts, reset streaming state, run warmup
+                if final_voice_prompt.endswith('.pt'):
+                    self.lm_gen.load_voice_prompt_embeddings(final_voice_prompt)
+                else:
+                    self.lm_gen.load_voice_prompt(final_voice_prompt)
+                self.lm_gen.text_prompt_tokens = self.text_tokenizer.encode(wrap_with_system_tags(final_text_prompt))
+                self.mimi.reset_streaming()
+                self.other_mimi.reset_streaming()
+                self.lm_gen.reset_streaming()
+                self.lm_gen.step_system_prompts(self.mimi)
+                self.mimi.reset_streaming()  # Reset mimi encode state (matches offline.py behavior)
             
             # Process input WAV
             input_data, _ = sf.read(input_wav_path, dtype="float32")
@@ -469,9 +491,72 @@ class PersonaPlexManager:
                 codes = self.mimi.encode(chunk_ts)
                 
                 tokens = self.lm_gen.step(codes)
+                if tokens is None:
+                    continue
                 
                 # Decode and yield audio chunk
                 out_pcm = self.other_mimi.decode(tokens[:, 1 : self.lm.dep_q + 1])
+                pcm_np = out_pcm.cpu().detach().numpy().squeeze()
+                yield pcm_np
+
+    def tts_stream(self, text: str, voice_prompt_path: str):
+        """Generator that yields audio chunks for the given text using teacher-forced TTS.
+
+        Unlike infer_stream (which feeds silence and waits for the model to speak freely),
+        this method forces text tokens token-by-token via lm_gen.step(text_token=tok).
+        The depformer then generates audio conditioned on knowing exactly what is being said.
+        This is the same mechanism used internally by step_system_prompts/_step_text_prompt
+        but with the audio output captured for playback.
+        """
+        self._apply_optimizations()
+        self.load()
+
+        final_voice_prompt = _ensure_voice_prompt_exists(voice_prompt_path)
+
+        with self._lock:
+            if self._primed and self._primed_for == voice_prompt_path:
+                self._primed = False
+                logger.info("PersonaPlexManager: tts_stream using pre-warmed voice prompt state.")
+            else:
+                if final_voice_prompt.endswith('.pt'):
+                    self.lm_gen.load_voice_prompt_embeddings(final_voice_prompt)
+                else:
+                    self.lm_gen.load_voice_prompt(final_voice_prompt)
+                self.mimi.reset_streaming()
+                self.other_mimi.reset_streaming()
+                self.lm_gen.reset_streaming()
+                self.lm_gen.step_system_prompts(self.mimi)
+                self.mimi.reset_streaming()
+
+            # Encode the text WITHOUT system tags — these are the words to speak
+            text_tokens = self.text_tokenizer.encode(text)
+            # Pre-computed sine token tensor for user audio channel
+            sine_frame = self.lm_gen._encode_sine_frame()  # user "input" for context [1,8,1]
+
+            # Teacher-force each text token; do NOT provide moshi_tokens so the depformer
+            # samples audio autoregressively (providing zero_frame would force silence output).
+            for text_token in text_tokens:
+                tokens = self.lm_gen.step(
+                    text_token=text_token,
+                    input_tokens=sine_frame,
+                )
+                if tokens is None:
+                    continue
+                out_pcm = self.mimi.decode(tokens[:, 1 : self.lm.dep_q + 1])
+                pcm_np = out_pcm.cpu().detach().numpy().squeeze()
+                logger.debug("tts_stream: frame amp max=%.6f tok=%d",
+                             float(np.abs(pcm_np).max()), text_token)
+                yield pcm_np
+
+            # Run a few silence frames to flush trailing audio (codec has lookahead delay)
+            for _ in range(self.lm_gen.audio_silence_frame_cnt):
+                tokens = self.lm_gen.step(
+                    text_token=self.lm_gen.zero_text_code,
+                    input_tokens=sine_frame,
+                )
+                if tokens is None:
+                    continue
+                out_pcm = self.mimi.decode(tokens[:, 1 : self.lm.dep_q + 1])
                 yield out_pcm.cpu().detach().numpy().squeeze()
 
     def infer(self, text_prompt: str, voice_prompt_path: str, input_wav_path: str, output_wav_path: str, output_text_path: Optional[str] = None):
@@ -494,24 +579,31 @@ class PersonaPlexManager:
         logger.debug("PersonaPlexManager: using voice prompt path: %s", final_voice_prompt)
 
         with self._lock:
-            # Reuse the warm generator
-            if PERSONAPLEX_USE_CUDA_GRAPHS:
-                from moshi.offline import warmup
-                frame_size = int(self.mimi.sample_rate / self.mimi.frame_rate)
-                warmup(self.mimi, self.other_mimi, self.lm_gen, self.device, frame_size)
-            
-            # Load prompts
-            if final_voice_prompt.endswith('.pt'):
-                self.lm_gen.load_voice_prompt_embeddings(final_voice_prompt)
+            # step_system_prompts processes the voice identity only.
+            # text_prompt_tokens (utterance) can be updated independently.
+            # Only compare voice_prompt_path for primed state match.
+            if self._primed and self._primed_for == voice_prompt_path:
+                self._primed = False  # Consume the primed state
+                logger.info("PersonaPlexManager: using pre-warmed voice prompt state.")
+                self.lm_gen.text_prompt_tokens = self.text_tokenizer.encode(wrap_with_system_tags(final_text_prompt))
+                if PERSONAPLEX_USE_CUDA_GRAPHS:
+                    frame_size = int(self.mimi.sample_rate / self.mimi.frame_rate)
+                    warmup(self.mimi, self.other_mimi, self.lm_gen, self.device, frame_size)
             else:
-                self.lm_gen.load_voice_prompt(final_voice_prompt)
-            
-            self.lm_gen.text_prompt_tokens = self.text_tokenizer.encode(wrap_with_system_tags(final_text_prompt))
-            
-            self.mimi.reset_streaming()
-            self.other_mimi.reset_streaming()
-            self.lm_gen.reset_streaming()
-            self.lm_gen.step_system_prompts(self.mimi)
+                # Full setup: load prompts, reset streaming, run warmup
+                if PERSONAPLEX_USE_CUDA_GRAPHS:
+                    frame_size = int(self.mimi.sample_rate / self.mimi.frame_rate)
+                    warmup(self.mimi, self.other_mimi, self.lm_gen, self.device, frame_size)
+                if final_voice_prompt.endswith('.pt'):
+                    self.lm_gen.load_voice_prompt_embeddings(final_voice_prompt)
+                else:
+                    self.lm_gen.load_voice_prompt(final_voice_prompt)
+                self.lm_gen.text_prompt_tokens = self.text_tokenizer.encode(wrap_with_system_tags(final_text_prompt))
+                self.mimi.reset_streaming()
+                self.other_mimi.reset_streaming()
+                self.lm_gen.reset_streaming()
+                self.lm_gen.step_system_prompts(self.mimi)
+                self.mimi.reset_streaming()  # Reset mimi encode state (matches offline.py behavior)
             
             # Process input WAV
             import soundfile as sf

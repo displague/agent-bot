@@ -241,8 +241,13 @@ async def main(stdscr=None, renderer_name="auto", renderer_reason="", dev_mode=F
     # Explicitly load PersonaPlex models during startup to show progress
     await asyncio.to_thread(personaplex_manager.load)
 
-    # Initial greeting to confirm voice is working
-    interaction_queue.put_nowait({"input": "Hello!", "audio_waveform": None})
+    # Initial greeting — override_response skips verbal filler and deep reasoning,
+    # so TTS starts immediately after models are loaded.
+    interaction_queue.put_nowait({
+        "input": "[Startup]",
+        "audio_waveform": None,
+        "override_response": "Hello! I'm online and ready.",
+    })
 
     event_scheduler = EventScheduler(
         state, interaction_log_manager, index_manager, runtime_manager=runtime_manager

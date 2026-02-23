@@ -62,23 +62,24 @@ class InteractionProcessor:
         self.logger.info(f"Triggering verbal filler: {filler}")
         
         try:
-            with tempfile.TemporaryDirectory(prefix="filler_") as tmpdir:
-                input_wav = os.path.join(tmpdir, "silence.wav")
-                duration = 0.5
-                samples = int(duration * VOICE_SAMPLE_RATE)
-                silence = np.zeros(samples, dtype=np.float32)
-                sf.write(input_wav, silence, VOICE_SAMPLE_RATE)
-                
-                if self.personaplex_manager:
-                    # Stream chunks directly to voice loop for instant playback
-                    stream = self.personaplex_manager.infer_stream(
-                        text_prompt=filler,
-                        voice_prompt_path=PERSONAPLEX_VOICE_PROMPT,
-                        input_wav_path=input_wav
-                    )
-                    await self.voice_loop.say_chunks(stream)
-                else:
-                    # Fallback to offline/sub-process if manager not loaded
+            if self.personaplex_manager:
+                # Run the synchronous generator in a thread, collect all chunks,
+                # then play as one continuous audio (avoids frame-by-frame gaps).
+                stream = self.personaplex_manager.tts_stream(
+                    text=filler,
+                    voice_prompt_path=PERSONAPLEX_VOICE_PROMPT,
+                )
+                chunks = await asyncio.to_thread(list, stream)
+                audio = np.concatenate([c for c in chunks if c.size > 0]).astype(np.float32)
+                await self.voice_loop.say_audio(audio)
+            else:
+                # Fallback to offline/sub-process if manager not loaded
+                with tempfile.TemporaryDirectory(prefix="filler_") as tmpdir:
+                    input_wav = os.path.join(tmpdir, "silence.wav")
+                    duration = 3.0
+                    samples = int(duration * VOICE_SAMPLE_RATE)
+                    silence = np.zeros(samples, dtype=np.float32)
+                    sf.write(input_wav, silence, VOICE_SAMPLE_RATE)
                     output_wav = os.path.join(tmpdir, "filler.wav")
                     await utils.run_personaplex_offline(
                         input_wav,
@@ -154,22 +155,23 @@ class InteractionProcessor:
 
                         # Speak final deep response aloud
                         try:
-                            with tempfile.TemporaryDirectory(prefix="final_") as tmpdir:
-                                input_wav = os.path.join(tmpdir, "silence.wav")
-                                duration = 0.5
-                                samples = int(duration * VOICE_SAMPLE_RATE)
-                                silence = np.zeros(samples, dtype=np.float32)
-                                sf.write(input_wav, silence, VOICE_SAMPLE_RATE)
-                                
-                                if self.personaplex_manager:
-                                    # Stream final response chunks directly to playback
-                                    stream = self.personaplex_manager.infer_stream(
-                                        text_prompt=response,
-                                        voice_prompt_path=PERSONAPLEX_VOICE_PROMPT,
-                                        input_wav_path=input_wav
-                                    )
-                                    await self.voice_loop.say_chunks(stream)
-                                else:
+                            if self.personaplex_manager:
+                                # Run the synchronous generator in a thread, collect all chunks,
+                                # then play as one continuous audio (avoids frame-by-frame gaps).
+                                stream = self.personaplex_manager.tts_stream(
+                                    text=response,
+                                    voice_prompt_path=PERSONAPLEX_VOICE_PROMPT,
+                                )
+                                chunks = await asyncio.to_thread(list, stream)
+                                audio = np.concatenate([c for c in chunks if c.size > 0]).astype(np.float32)
+                                await self.voice_loop.say_audio(audio)
+                            else:
+                                with tempfile.TemporaryDirectory(prefix="final_") as tmpdir:
+                                    input_wav = os.path.join(tmpdir, "silence.wav")
+                                    duration = 3.0
+                                    samples = int(duration * VOICE_SAMPLE_RATE)
+                                    silence = np.zeros(samples, dtype=np.float32)
+                                    sf.write(input_wav, silence, VOICE_SAMPLE_RATE)
                                     output_wav = os.path.join(tmpdir, "final.wav")
                                     await utils.run_personaplex_offline(
                                         input_wav,

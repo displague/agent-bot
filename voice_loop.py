@@ -155,6 +155,32 @@ class VoiceLoop:
             # Match the playback rate roughly
             await asyncio.sleep(VOICE_CHUNK_SECONDS * 0.8)
 
+    async def say_audio(self, pcm: "np.ndarray") -> None:
+        """Play a pre-rendered continuous PCM array as one uninterrupted utterance.
+
+        Preferred over say_chunks for TTS where all frames are already computed,
+        because say_chunks plays frame-by-frame with gaps that break up speech.
+        """
+        if np is None or pcm.size == 0 or float(np.abs(pcm).max()) < 1e-5:
+            return
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+            tmp = f.name
+        try:
+            sf.write(tmp, pcm.astype(np.float32), VOICE_SAMPLE_RATE)
+            self._speaking = True
+            await self._set_activity("speaking", "speaking")
+            await asyncio.to_thread(
+                utils.play_wav_file_interruptible, tmp, self._playback_interrupt
+            )
+            self._speaking = False
+            await self._set_activity("listening", "playback complete")
+        except Exception as e:
+            self._speaking = False
+            logger.error("say_audio error: %s", e)
+        finally:
+            if os.path.exists(tmp):
+                os.unlink(tmp)
+
     def _set_state(self, *, mode: Optional[str] = None, server: Optional[str] = None, session: Optional[str] = None):
         if mode is not None:
             self.state["voice_mode"] = mode
@@ -289,6 +315,8 @@ class VoiceLoop:
                 tb = traceback.format_exc()
                 logger.error("Voice listen loop error: %s\n%s", err_msg, tb)
                 await self._set_activity("error", f"listen error: {err_msg[:80]}")
+                # Reset broken session so start() is retried cleanly next chunk.
+                self._streaming_session = None
                 await asyncio.sleep(0.2)
 
     async def _process_loop(self):
