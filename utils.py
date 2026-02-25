@@ -173,37 +173,36 @@ class PersonaPlexStreamingSession:
         self._is_ready = False
 
     def start(self):
-        """Initialize the session by resetting the manager's warm lm_gen state.
-        
-        Creating a new LMGen that wraps the already-streaming manager.lm breaks
-        step_system_prompts (depformer.is_streaming assertion). Instead, reuse
-        manager.lm_gen directly — reset_streaming + step_system_prompts works
-        on it, as proven by load() pre-warm and infer_stream().
+        """Initialize the session by restoring the pre-warmed lm_gen state.
+
+        Uses _restore_primed_state() instead of re-running step_system_prompts
+        (~46s) so session starts are instant after load() warmup.
         """
-        from moshi.offline import wrap_with_system_tags
-        
         self.manager._apply_optimizations()
         self.manager.load()
-        
-        final_voice_prompt = _ensure_voice_prompt_exists(self.voice_prompt_path)
 
         with self.manager._lock:
-            # Reuse the manager's warm lm_gen rather than creating a new one.
             self.lm_gen = self.manager.lm_gen
             self.frame_size = int(self.manager.mimi.sample_rate / self.manager.mimi.frame_rate)
 
-            # Load voice/text prompts and reset streaming state (same path as infer_stream).
-            if final_voice_prompt.endswith('.pt'):
-                self.lm_gen.load_voice_prompt_embeddings(final_voice_prompt)
-            else:
-                self.lm_gen.load_voice_prompt(final_voice_prompt)
-            self.lm_gen.text_prompt_tokens = self.manager.text_tokenizer.encode(
-                wrap_with_system_tags(self.text_prompt)
-            )
-            self.manager.mimi.reset_streaming()
-            self.manager.other_mimi.reset_streaming()
-            self.lm_gen.reset_streaming()
-            self.lm_gen.step_system_prompts(self.manager.mimi)
+            if not self.manager._restore_primed_state():
+                # _lm_primed_state not available yet — fall back to full setup
+                from moshi.offline import wrap_with_system_tags
+                final_voice_prompt = _ensure_voice_prompt_exists(self.voice_prompt_path)
+                if final_voice_prompt.endswith('.pt'):
+                    self.lm_gen.load_voice_prompt_embeddings(final_voice_prompt)
+                else:
+                    self.lm_gen.load_voice_prompt(final_voice_prompt)
+                self.lm_gen.text_prompt_tokens = self.manager.text_tokenizer.encode(
+                    wrap_with_system_tags(self.text_prompt)
+                )
+                self.manager.mimi.reset_streaming()
+                self.manager.other_mimi.reset_streaming()
+                self.lm_gen.reset_streaming()
+                self.lm_gen.step_system_prompts(self.manager.mimi)
+                self.manager.mimi.reset_streaming()
+                self.manager._save_primed_state()
+
             self._is_ready = True
 
     def step(self, audio_chunk: np.ndarray) -> Tuple[Optional[np.ndarray], Optional[str]]:
