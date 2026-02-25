@@ -284,9 +284,11 @@ class VoiceLoop:
                             await self._set_activity("thinking", f"Model: {self._streaming_text_buffer[-40:]}")
 
                     if out_audio is not None and np.abs(out_audio).max() > 0.01:
-                        # Model is starting to speak!
-                        # In true full-duplex, we stream this audio out immediately.
-                        self._playback_queue.put_nowait(out_audio)
+                        # Buffer model audio; do NOT play immediately.
+                        # Playing every frame as it arrives causes:
+                        #   1. Filler audio during silence (model generates when fed zeros)
+                        #   2. Double-playback (audio also replays at utterance boundary)
+                        # Playback is handled once at utterance boundary in _process_loop.
                         self._streaming_audio_buffer.append(out_audio)
 
                 if is_speech and self._speaking and self._policy == "hard":
@@ -304,15 +306,14 @@ class VoiceLoop:
                 if chunks and silence_s >= VOICE_SILENCE_SECONDS:
                     if speaking_s >= VOICE_MIN_UTTERANCE_SECONDS:
                         if self._streaming_session and self._streaming_audio_buffer:
-                            # In streaming mode, we already have the output audio!
                             combined_audio = np.concatenate(self._streaming_audio_buffer)
-                            # Put it in a format process_loop expects or create a new path
-                            # For simplicity now, we'll put it in the queue with a special key
-                            await self._utterance_queue.put({
-                                "type": "streaming_result",
-                                "audio": combined_audio,
-                                "text": self._streaming_text_buffer
-                            })
+                            # Only queue if the model actually generated audible audio
+                            if float(np.abs(combined_audio).max()) > 0.02:
+                                await self._utterance_queue.put({
+                                    "type": "streaming_result",
+                                    "audio": combined_audio,
+                                    "text": self._streaming_text_buffer
+                                })
                             self._streaming_audio_buffer = []
                             self._streaming_text_buffer = ""
                             # Reset session for next turn

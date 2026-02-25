@@ -737,9 +737,12 @@ class PersonaPlexManager:
             
             return output_wav_path
 
-    def hear_stream(self, heard_text: str, voice_prompt_path: str):
-        """Conversational inference: synthesise *heard_text* as user speech,
-        feed it to PersonaPlex, and yield PCM frames of the agent's spoken reply.
+    def hear_stream(self, heard_text: str, voice_prompt_path: str, user_wav_path: str = None):
+        """Conversational inference: feed user speech to PersonaPlex, yield agent PCM frames.
+
+        If *user_wav_path* is given, that audio file is used as the user's voice input
+        (any format — converted via ffmpeg if needed).  Otherwise *heard_text* is
+        synthesised to speech via text_to_wav().
 
         Unlike tts_stream (which teacher-forces the LM to say specific words),
         this uses the full conversational path: the model *hears* the user
@@ -749,12 +752,27 @@ class PersonaPlexManager:
         """
         import tempfile as _tempfile
 
+        _TRAILING_SILENCE_S = 4.0   # seconds of silence after speech — gives model time to respond
+        _LEADING_SILENCE_AMP = 0.02  # skip leading output frames that are nearly silent
+        _sample_rate = int(self.mimi.sample_rate)
+
         with _tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as _f:
             user_wav = _f.name
         with _tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as _f:
             agent_wav = _f.name
         try:
-            text_to_wav(heard_text, user_wav, sample_rate=int(self.mimi.sample_rate))
+            if user_wav_path:
+                _convert_to_wav(user_wav_path, user_wav, sample_rate=_sample_rate)
+            else:
+                text_to_wav(heard_text, user_wav, sample_rate=_sample_rate)
+
+            # Append trailing silence so the model has time to formulate a response.
+            # Without this, infer() only processes ~2s of audio (~25 frames) —
+            # not enough for the model to generate a reply.
+            tts_data, tts_sr = sf.read(user_wav, dtype="float32")
+            trailing = np.zeros(int(tts_sr * _TRAILING_SILENCE_S), dtype=np.float32)
+            sf.write(user_wav, np.concatenate([tts_data, trailing]), tts_sr)
+
             self.infer(
                 text_prompt=PERSONAPLEX_TEXT_PROMPT,
                 voice_prompt_path=voice_prompt_path,
@@ -763,9 +781,14 @@ class PersonaPlexManager:
             )
             if os.path.exists(agent_wav):
                 data, _ = sf.read(agent_wav, dtype="float32")
-                # Yield frame-sized chunks matching mimi's output stride
                 frame = int(self.mimi.sample_rate / self.mimi.frame_rate)
+                # Skip leading near-silent frames (model is still "thinking" early on)
+                first_speech = 0
                 for i in range(0, len(data), frame):
+                    if float(np.abs(data[i : i + frame]).max()) >= _LEADING_SILENCE_AMP:
+                        first_speech = i
+                        break
+                for i in range(first_speech, len(data), frame):
                     yield data[i : i + frame].astype(np.float32)
         finally:
             for p in (user_wav, agent_wav):
@@ -976,6 +999,37 @@ class DebugServer:
         finally:
             writer.close()
             await writer.wait_closed()
+
+
+def _convert_to_wav(src_path: str, dst_path: str, sample_rate: int = 24000) -> None:
+    """Convert *src_path* (any ffmpeg-supported format) to mono WAV at *sample_rate* Hz.
+
+    Uses ffmpeg subprocess so it handles M4A, MP3, FLAC, OGG, etc.
+    Falls back to soundfile + torchaudio resample for plain WAV inputs.
+    """
+    ext = os.path.splitext(src_path)[1].lower()
+    if ext == ".wav":
+        # Already WAV — read, ensure mono + correct rate, write out
+        import torchaudio, torch as _torch
+        data, sr = sf.read(src_path, dtype="float32", always_2d=False)
+        wav = _torch.from_numpy(data)
+        if wav.ndim == 1:
+            wav = wav.unsqueeze(0)
+        elif wav.ndim == 2:
+            wav = wav.T
+        if wav.shape[0] > 1:
+            wav = wav.mean(0, keepdim=True)
+        if sr != sample_rate:
+            wav = torchaudio.functional.resample(wav, sr, sample_rate)
+        sf.write(dst_path, wav.squeeze(0).numpy().astype(np.float32), sample_rate)
+    else:
+        # Non-WAV: use ffmpeg to decode + resample in one pass
+        result = subprocess.run(
+            ["ffmpeg", "-y", "-i", src_path, "-ar", str(sample_rate), "-ac", "1", "-f", "wav", dst_path],
+            capture_output=True, text=True,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"ffmpeg conversion failed: {result.stderr[-300:]}")
 
 
 def text_to_wav(text: str, path: str, sample_rate: int = 24000) -> None:

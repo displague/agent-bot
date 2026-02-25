@@ -344,6 +344,28 @@ class SimpleRenderer:
             else:
                 print("/voice-hear requires PersonaPlex + VoiceLoop")
             return
+        if cmd.startswith("/voice-hear-file "):
+            path = raw[17:].strip()
+            if not path:
+                print("/voice-hear-file requires a file path")
+                return
+            print(f"Injecting audio file: {path}")
+            pm = (getattr(self.interaction_processor, "personaplex_manager", None)
+                  or getattr(self._voice_loop, "personaplex_manager", None))
+            vl = self._voice_loop
+            if pm and vl:
+                async def _do_hear_file():
+                    chunks = await asyncio.to_thread(
+                        list, pm.hear_stream("", pm._primed_for or "", user_wav_path=path)
+                    )
+                    if chunks:
+                        import numpy as _np
+                        audio = _np.concatenate([c for c in chunks if c.size > 0]).astype(_np.float32)
+                        await vl.say_audio(audio)
+                asyncio.create_task(_do_hear_file())
+            else:
+                print("/voice-hear-file requires PersonaPlex + VoiceLoop")
+            return
         if cmd.startswith("/set-persona "):
             new_persona = raw[13:].strip()
             if not new_persona:
