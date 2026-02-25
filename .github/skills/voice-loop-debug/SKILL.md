@@ -26,6 +26,12 @@ Use this skill when the app shows voice loop running but user sees no response o
 - **Role Alternation**: Gemma-3n strictly requires alternating `user`/`assistant` roles. Merge consecutive entries from the same role.
 - **Warm Generator**: Always use the persistent `self.lm_gen` in `PersonaPlexManager` to avoid the 30s re-instantiation delay.
 - **VAD Muting**: Feeding silence (`np.zeros`) to Moshi when the user isn't speaking prevents background noise from poisoning the KV cache.
+- **Streaming Session Must Reset After TTS**: `tts_stream()` and `infer()` modify `lm_gen` state. After `say_audio()` completes, set `_streaming_session = None` so the next session calls `_restore_primed_state()` for a clean state. Without this, the session runs on corrupted KV cache.
+- **Drain Audio Queue After TTS**: While the GPU is locked by TTS generation, audio chunks pile up in `_audio_queue`. After playback, drain all queued chunks so the model doesn't respond to minutes-old microphone audio.
+- **TTS Lock Interaction**: `tts_stream`, `infer`, and `infer_stream` all hold `manager._lock` for their full duration. `PersonaPlexStreamingSession.step()` also acquires this lock per 80ms frame. The session is effectively paused during TTS — the `not self._speaking` guard in `_listen_loop` prevents step() calls, but audio keeps accumulating.
+- **Session Start Cost**: `PersonaPlexStreamingSession.start()` should use `_restore_primed_state()` (instant) not `step_system_prompts` (~46s). After each TTS call, session is invalidated (`_streaming_session = None`) and recreated on the next voice frame — the fast restore path is critical for responsiveness.
+- **Chunked vs Continuous Playback**: Playing each 80ms PCM frame as a separate `play_wav_file_interruptible` call causes ~380ms gaps between syllables. Pre-concatenate all TTS frames into a single buffer and play once via `say_audio()`.
+- **Teacher-Forced TTS**: Call `step(text_token=tok, input_tokens=sine_frame)` WITHOUT `moshi_tokens` — depformer samples audio autoregressively. Passing `moshi_tokens=zero_frame` forces silent PAD tokens (see issue #X). The first 1-2 frames are quiet; amplitude appears from frame 3+.
 
 ## Triage Flow
 
