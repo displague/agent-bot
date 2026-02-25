@@ -116,7 +116,8 @@ class SimpleRenderer:
             print(
                 "Commands: /help, /model, /llm-status, /llm-diagnose, /smoke, /smoke-model, /smoke-all, "
                 "/voice-start, /voice-stop, /voice-status, /voice-diagnose, /voice-test-tone, /voice-devices, "
-                "/voice-set-device <in|out> <id>, /voice-say <text>, /set-persona <text>, /voice-optimize <mode>, /logic-reload, /wake, /sleep, /quit, /force-quit"
+                "/voice-set-device <in|out> <id>, /voice-say <text>, /voice-hear <text>, /voice-hear-file <path>, "
+                "/set-persona <text>, /voice-optimize <mode>, /logic-reload, /wake, /sleep, /quit, /force-quit"
             )
             print("Ctrl+D (EOF) also exits in simple mode.")
             print(f"Voice hotkey is available in curses mode via {VOICE_CAPTURE_KEY_LABEL}.")

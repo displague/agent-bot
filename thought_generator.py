@@ -5,6 +5,7 @@ import random
 from datetime import datetime
 import logging
 
+import config
 from config import (
     DAILY_SLEEP_END,
     DAILY_SLEEP_START,
@@ -40,7 +41,7 @@ class ThoughtGenerator:
             current_hour = datetime.now().hour
             is_sleep_time = (DAILY_SLEEP_START <= current_hour or current_hour < DAILY_SLEEP_END)
             
-            if is_sleep_time and not self.state.get("manual_wake"):
+            if is_sleep_time and not self.state.get("manual_wake") and not config.NO_SLEEP:
                 self.state["is_sleeping"] = True
                 await asyncio.sleep(random.uniform(5, 10))
             elif SKIP_DEEP_REASONING:

@@ -375,6 +375,7 @@ if __name__ == "__main__":
     parser.add_argument("--reset-logs", action="store_true", help="Clear all logs on startup")
     parser.add_argument("--dev", action="store_true", help="Enable dev mode (disables autonomous tasks)")
     parser.add_argument("--skip-deep-reasoning", action="store_true", help="Bypass the deep reasoning LLM phase")
+    parser.add_argument("--no-sleep", action="store_true", help="Disable sleep schedule; agent stays ACTIVE at all hours")
     args_parsed = parser.parse_args()
 
     if args_parsed.reset_logs:
@@ -391,6 +392,8 @@ if __name__ == "__main__":
         if args_parsed.skip_deep_reasoning:
             config.SKIP_DEEP_REASONING = True
         skip_reasoning = getattr(config, "SKIP_DEEP_REASONING", False)
+        if args_parsed.no_sleep:
+            config.NO_SLEEP = True
         
         curses_ok, curses_mod, reason = _check_curses_available()
 

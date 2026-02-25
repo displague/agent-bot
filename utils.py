@@ -220,9 +220,17 @@ class PersonaPlexStreamingSession:
                 if len(sub_chunk) < self.frame_size:
                     sub_chunk = np.pad(sub_chunk, (0, self.frame_size - len(sub_chunk)))
                 
-                sub_chunk = np.ascontiguousarray(sub_chunk)
-                chunk_ts = torch.from_numpy(sub_chunk).to(self.manager.device).unsqueeze(0).unsqueeze(0)
-                codes = self.manager.mimi.encode(chunk_ts)
+                # Use pre-computed silence tokens for near-zero frames — avoids a
+                # GPU mimi.encode() call per silent frame (saves ~1ms each).
+                if np.abs(sub_chunk).max() < 1e-5:
+                    from moshi.models.lm import SILENCE_TOKENS
+                    codes = torch.as_tensor(
+                        SILENCE_TOKENS, dtype=torch.long, device=self.manager.device
+                    ).view(1, 8, 1)
+                else:
+                    sub_chunk = np.ascontiguousarray(sub_chunk)
+                    chunk_ts = torch.from_numpy(sub_chunk).to(self.manager.device).unsqueeze(0).unsqueeze(0)
+                    codes = self.manager.mimi.encode(chunk_ts)
                 
                 tokens = self.lm_gen.step(codes)
                 
@@ -770,6 +778,7 @@ class PersonaPlexManager:
             # Without this, infer() only processes ~2s of audio (~25 frames) —
             # not enough for the model to generate a reply.
             tts_data, tts_sr = sf.read(user_wav, dtype="float32")
+            user_speech_samples = len(tts_data)  # track where user speech ends
             trailing = np.zeros(int(tts_sr * _TRAILING_SILENCE_S), dtype=np.float32)
             sf.write(user_wav, np.concatenate([tts_data, trailing]), tts_sr)
 
@@ -782,14 +791,19 @@ class PersonaPlexManager:
             if os.path.exists(agent_wav):
                 data, _ = sf.read(agent_wav, dtype="float32")
                 frame = int(self.mimi.sample_rate / self.mimi.frame_rate)
-                # Skip leading near-silent frames (model is still "thinking" early on)
-                first_speech = 0
-                for i in range(0, len(data), frame):
-                    if float(np.abs(data[i : i + frame]).max()) >= _LEADING_SILENCE_AMP:
-                        first_speech = i
-                        break
-                for i in range(first_speech, len(data), frame):
-                    yield data[i : i + frame].astype(np.float32)
+                # In full-duplex mode the model generates one output frame per input
+                # frame — including while the user is still speaking. Those "overlap"
+                # frames are the model trying to talk over the user and are almost
+                # always incoherent. Only play output from the silence window
+                # (after user speech ends) where the model actually responds.
+                speech_frame_start = (user_speech_samples // frame) * frame
+                found_speech = False
+                for i in range(speech_frame_start, len(data), frame):
+                    chunk = data[i : i + frame]
+                    if not found_speech and float(np.abs(chunk).max()) < _LEADING_SILENCE_AMP:
+                        continue  # skip leading-silence frames in the response window
+                    found_speech = True
+                    yield chunk.astype(np.float32)
         finally:
             for p in (user_wav, agent_wav):
                 if os.path.exists(p):

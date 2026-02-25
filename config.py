@@ -9,6 +9,7 @@ COMPRESSED_LOG_PATH = "compressed_logs/compressed_log.jsonl"
 INDEX_PATH = "index/context_index.json"
 DAILY_SLEEP_START = 23
 DAILY_SLEEP_END = 7
+NO_SLEEP = False  # Override with --no-sleep to stay ACTIVE at all hours
 MAX_WORKERS = 5
 MODEL_PATH = "model.bin"  # Legacy fallback path for local GGUF.
 
