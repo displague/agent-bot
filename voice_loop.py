@@ -173,9 +173,25 @@ class VoiceLoop:
                 utils.play_wav_file_interruptible, tmp, self._playback_interrupt
             )
             self._speaking = False
+            # Invalidate the streaming session — tts_stream modified lm_gen state,
+            # so the next session must start fresh with _restore_primed_state().
+            self._streaming_session = None
+            # Drain stale audio that accumulated while the GPU was busy with TTS
+            # so the model won't respond to audio that's already minutes old.
+            drained = 0
+            if self._audio_queue is not None:
+                while not self._audio_queue.empty():
+                    try:
+                        self._audio_queue.get_nowait()
+                        drained += 1
+                    except Exception:
+                        break
+            if drained:
+                logger.debug("say_audio: drained %d stale audio chunks after TTS playback", drained)
             await self._set_activity("listening", "playback complete")
         except Exception as e:
             self._speaking = False
+            self._streaming_session = None
             logger.error("say_audio error: %s", e)
         finally:
             if os.path.exists(tmp):
