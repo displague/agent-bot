@@ -697,13 +697,8 @@ class TUIRenderer:
             vl = self._voice_loop
             if pm and vl:
                 async def _do_hear():
-                    chunks = await asyncio.to_thread(
-                        list, pm.hear_stream(text, pm._primed_for or "")
-                    )
-                    if chunks:
-                        import numpy as _np
-                        audio = _np.concatenate([c for c in chunks if c.size > 0]).astype(_np.float32)
-                        await vl.say_audio(audio)
+                    stream = pm.hear_stream(text, pm._primed_for or "")
+                    await vl.say_stream(stream)
                 asyncio.create_task(_do_hear())
             else:
                 self.show_footer_message("/voice-hear requires PersonaPlex + VoiceLoop")
@@ -721,13 +716,8 @@ class TUIRenderer:
             vl = self._voice_loop
             if pm and vl:
                 async def _do_hear_file():
-                    chunks = await asyncio.to_thread(
-                        list, pm.hear_stream("", pm._primed_for or "", user_wav_path=path)
-                    )
-                    if chunks:
-                        import numpy as _np
-                        audio = _np.concatenate([c for c in chunks if c.size > 0]).astype(_np.float32)
-                        await vl.say_audio(audio)
+                    stream = pm.hear_stream("", pm._primed_for or "", user_wav_path=path)
+                    await vl.say_stream(stream)
                 asyncio.create_task(_do_hear_file())
             else:
                 self.show_footer_message("/voice-hear-file requires PersonaPlex + VoiceLoop")
