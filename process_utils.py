@@ -23,4 +23,3 @@ def force_exit_now(exit_code: int = 130) -> None:
     except Exception:
         pass
     os._exit(exit_code)
-

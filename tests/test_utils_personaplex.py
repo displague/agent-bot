@@ -34,21 +34,22 @@ async def test_run_personaplex_offline_returns_generated_text(monkeypatch, tmp_p
     # Patch the in-process path which is tried first
     dummy_voice = tmp_path / "dummy_voice.pt"
     dummy_voice.write_bytes(b"fake")
-    
+
     # We must patch where it's used
-    with patch('utils.moshi_run_inference', mock_moshi_run_inference), \
-         patch('utils._ensure_voice_prompt_exists', return_value=str(dummy_voice)), \
-         patch('subprocess.run') as mock_run:
-        
+    with patch("utils.moshi_run_inference", mock_moshi_run_inference), patch(
+        "utils._ensure_voice_prompt_exists", return_value=str(dummy_voice)
+    ), patch("subprocess.run") as mock_run:
+
         mock_run.return_value = SimpleNamespace(returncode=0, stdout="done", stderr="")
-        
+
         async def mock_to_thread(func, *args, **kwargs):
             # Crucially, call the function passed in!
             return func(*args, **kwargs)
 
-        with patch('asyncio.to_thread', side_effect=mock_to_thread), \
-             patch('utils._decode_output_tokens', return_value="hi there"):
-            
+        with patch("asyncio.to_thread", side_effect=mock_to_thread), patch(
+            "utils._decode_output_tokens", return_value="hi there"
+        ):
+
             result = await utils.run_personaplex_offline(
                 str(input_wav),
                 str(output_wav),

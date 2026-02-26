@@ -20,11 +20,13 @@ class FunctionalAgent:
     async def handle_request(self, prompt):
         """Handles a request through multiple phases."""
         if self.llama_manager is None:
-            self.logger.info("Deep reasoning disabled (no LLM). Returning default response.")
+            self.logger.info(
+                "Deep reasoning disabled (no LLM). Returning default response."
+            )
             return "Okay."
 
         self.logger.debug(f"Handling request: {prompt}")
-        
+
         # User input is part of the long-term context
         self.llama_manager.update_context(f"User: {prompt}")
 
@@ -71,8 +73,8 @@ class FunctionalAgent:
         self.logger.debug(f"Final response: {final_response}")
         self.logger.info("Request processing complete.")
         self.state["processing_phase"] = "Done"
-        
+
         # Add final response to long-term context
         self.llama_manager.update_context(f"Assistant: {final_response}")
-        
+
         return final_response

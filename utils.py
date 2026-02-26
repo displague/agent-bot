@@ -1,4 +1,5 @@
 import asyncio
+import gc
 import json
 import logging
 import os
@@ -32,6 +33,7 @@ from config import (
     VOICE_SAMPLE_RATE,
     VOICE_CHUNK_SECONDS,
 )
+import config as _config
 
 try:
     import sounddevice as sd
@@ -58,7 +60,9 @@ _voice_prompt_cache: dict = {}
 def _streaming_state_to_cpu(state):
     """Recursively clone a streaming state dict/dataclass, moving tensors to CPU RAM."""
     import copy
+    import torch
     from dataclasses import fields, is_dataclass
+
     if isinstance(state, torch.Tensor):
         return state.detach().cpu().clone()
     if is_dataclass(state) and not isinstance(state, type):
@@ -76,13 +80,17 @@ def _streaming_state_to_cpu(state):
 def _streaming_state_to_device(state, device):
     """Recursively clone a CPU streaming state, moving tensors to *device*."""
     import copy
+    import torch
     from dataclasses import fields, is_dataclass
+
     if isinstance(state, torch.Tensor):
         return state.to(device, non_blocking=True).clone()
     if is_dataclass(state) and not isinstance(state, type):
         new = copy.copy(state)
         for f in fields(state):
-            setattr(new, f.name, _streaming_state_to_device(getattr(state, f.name), device))
+            setattr(
+                new, f.name, _streaming_state_to_device(getattr(state, f.name), device)
+            )
         return new
     if isinstance(state, dict):
         return {k: _streaming_state_to_device(v, device) for k, v in state.items()}
@@ -91,7 +99,9 @@ def _streaming_state_to_device(state, device):
     return copy.copy(state)
 
 
-def _ensure_voice_prompt_exists(voice_name: str, repo_id: str = "nvidia/personaplex-7b-v1") -> str:
+def _ensure_voice_prompt_exists(
+    voice_name: str, repo_id: str = "nvidia/personaplex-7b-v1"
+) -> str:
     """Ensure the voice prompt exists locally, downloading from HF if needed."""
     if voice_name in _voice_prompt_cache:
         return _voice_prompt_cache[voice_name]
@@ -108,11 +118,15 @@ def _ensure_voice_prompt_exists(voice_name: str, repo_id: str = "nvidia/personap
     # Check common local locations — voices/ first to avoid walking the whole tree
     project_root = Path(__file__).parent.absolute()
     v_dir = PERSONAPLEX_VOICE_PROMPT_DIR.strip()
-    
-    local_search_dirs = [project_root / "voices", project_root / "personaplex", Path(".")]
+
+    local_search_dirs = [
+        project_root / "voices",
+        project_root / "personaplex",
+        Path("."),
+    ]
     if v_dir:
         local_search_dirs.insert(0, Path(v_dir))
-        
+
     for search_dir in local_search_dirs:
         if not search_dir.exists():
             continue
@@ -125,7 +139,9 @@ def _ensure_voice_prompt_exists(voice_name: str, repo_id: str = "nvidia/personap
                 return found_path
 
     # Not found locally, attempt HF download
-    logger.info("Voice prompt '%s' not found locally. Attempting HF download...", voice_name)
+    logger.info(
+        "Voice prompt '%s' not found locally. Attempting HF download...", voice_name
+    )
     try:
         files = list_repo_files(repo_id=repo_id)
         if voice_name in files:
@@ -136,17 +152,19 @@ def _ensure_voice_prompt_exists(voice_name: str, repo_id: str = "nvidia/personap
             result = hf_hub_download(repo_id=repo_id, filename=f"voices/{voice_name}")
             _voice_prompt_cache[voice_name] = result
             return result
-        
+
         # Fallback to voices.tgz
         if "voices.tgz" in files:
-            logger.info("Prompt not found as standalone. Downloading and extracting voices.tgz...")
+            logger.info(
+                "Prompt not found as standalone. Downloading and extracting voices.tgz..."
+            )
             tgz_path = hf_hub_download(repo_id=repo_id, filename="voices.tgz")
             project_root = Path(__file__).parent.absolute()
             extract_dir = project_root / "voices"
             extract_dir.mkdir(parents=True, exist_ok=True)
             with tarfile.open(tgz_path, "r:gz") as tar:
                 tar.extractall(path=extract_dir)
-            
+
             # Find it in extracted dir
             for root, _, files in os.walk(extract_dir):
                 if voice_name in files:
@@ -155,13 +173,13 @@ def _ensure_voice_prompt_exists(voice_name: str, repo_id: str = "nvidia/personap
                     return result
     except Exception as e:
         logger.error("Failed to download voice prompt from HF: %s", e)
-    
+
     return voice_name
 
 
 class PersonaPlexStreamingSession:
     """Manages an active, stateful streaming session with PersonaPlex models."""
-    
+
     def __init__(self, manager, text_prompt: str, voice_prompt_path: str):
         self.manager = manager
         self.text_prompt = text_prompt
@@ -178,18 +196,23 @@ class PersonaPlexStreamingSession:
         Uses _restore_primed_state() instead of re-running step_system_prompts
         (~46s) so session starts are instant after load() warmup.
         """
+        import torch
+
         self.manager._apply_optimizations()
         self.manager.load()
 
-        with self.manager._lock:
+        with torch.no_grad(), self.manager._lock:
             self.lm_gen = self.manager.lm_gen
-            self.frame_size = int(self.manager.mimi.sample_rate / self.manager.mimi.frame_rate)
+            self.frame_size = int(
+                self.manager.mimi.sample_rate / self.manager.mimi.frame_rate
+            )
 
             if not self.manager._restore_primed_state():
                 # _lm_primed_state not available yet — fall back to full setup
                 from moshi.offline import wrap_with_system_tags
+
                 final_voice_prompt = _ensure_voice_prompt_exists(self.voice_prompt_path)
-                if final_voice_prompt.endswith('.pt'):
+                if final_voice_prompt.endswith(".pt"):
                     self.lm_gen.load_voice_prompt_embeddings(final_voice_prompt)
                 else:
                     self.lm_gen.load_voice_prompt(final_voice_prompt)
@@ -205,49 +228,94 @@ class PersonaPlexStreamingSession:
 
             self._is_ready = True
 
-    def step(self, audio_chunk: np.ndarray) -> Tuple[Optional[np.ndarray], Optional[str]]:
+    def step(
+        self, audio_chunk: np.ndarray
+    ) -> Tuple[Optional[np.ndarray], Optional[str]]:
         """Process a single audio chunk and return generated audio and text (if any)."""
+        import torch
+
         if not self._is_ready:
             self.start()
-            
+
         # Use manager._lock so step() is mutually exclusive with infer_stream/infer.
-        with self.manager._lock:
+        with torch.no_grad(), self.manager._lock:
+            start_time = time.perf_counter()
             all_out_pcms = []
             new_texts = []
-            
+
+            num_frames = 0
             for i in range(0, len(audio_chunk), self.frame_size):
+                num_frames += 1
                 sub_chunk = audio_chunk[i : i + self.frame_size]
                 if len(sub_chunk) < self.frame_size:
                     sub_chunk = np.pad(sub_chunk, (0, self.frame_size - len(sub_chunk)))
-                
-                sub_chunk = np.ascontiguousarray(sub_chunk)
-                chunk_ts = torch.from_numpy(sub_chunk).to(self.manager.device).unsqueeze(0).unsqueeze(0)
-                codes = self.manager.mimi.encode(chunk_ts)
-                
+
+                # Use pre-computed silence tokens for near-zero frames — avoids a
+                # GPU mimi.encode() call per silent frame (saves ~1ms each).
+                if np.abs(sub_chunk).max() < 1e-5:
+                    from moshi.models.lm import SILENCE_TOKENS
+
+                    codes = torch.as_tensor(
+                        SILENCE_TOKENS, dtype=torch.long, device=self.manager.device
+                    ).view(1, 8, 1)
+                    _ = self.manager.other_mimi.encode(
+                        torch.zeros(1, 1, self.frame_size, device=self.manager.device)
+                    )  # keep other_mimi codec state in sync
+                else:
+                    sub_chunk = np.ascontiguousarray(sub_chunk)
+                    chunk_ts = (
+                        torch.from_numpy(sub_chunk)
+                        .to(self.manager.device)
+                        .unsqueeze(0)
+                        .unsqueeze(0)
+                    )
+                    codes = self.manager.mimi.encode(chunk_ts)
+                    _ = self.manager.other_mimi.encode(
+                        chunk_ts
+                    )  # state sync only — discard
+
                 tokens = self.lm_gen.step(codes)
-                
+
                 text_token = tokens[0, 0].item()
                 if text_token not in {0, 1, 2, 3}:
                     piece = self.manager.text_tokenizer.IdToPiece(text_token)
                     self.all_text_tokens.append(piece)
                     new_texts.append(piece)
-                
-                out_pcm = self.manager.other_mimi.decode(tokens[:, 1 : self.manager.lm.dep_q + 1])
+
+                # Use mimi (not other_mimi) for decode — mimi holds the correct audio codec state.
+                # other_mimi.decode() is called as a discard to keep its state in sync.
+                out_pcm = self.manager.mimi.decode(
+                    tokens[:, 1 : self.manager.lm.dep_q + 1]
+                )
+                _ = self.manager.other_mimi.decode(
+                    tokens[:, 1 : self.manager.lm.dep_q + 1]
+                )
                 all_out_pcms.append(out_pcm.cpu().detach().numpy().squeeze())
-            
+
+            if num_frames > 0:
+                duration_ms = (time.perf_counter() - start_time) * 1000
+                self.manager.state["inference_ms"] = duration_ms / num_frames
+
             final_audio = np.concatenate(all_out_pcms) if all_out_pcms else None
             final_text = "".join(new_texts) if new_texts else None
-            
+
             return final_audio, final_text
 
 
 class PersonaPlexManager:
     """Manages persistent in-process PersonaPlex models for fast inference."""
-    
-    def __init__(self, device: str = PERSONAPLEX_DEVICE, cpu_offload: bool = PERSONAPLEX_CPU_OFFLOAD, status_callback: Optional[Callable[[str], None]] = None):
+
+    def __init__(
+        self,
+        device: str = PERSONAPLEX_DEVICE,
+        cpu_offload: bool = PERSONAPLEX_CPU_OFFLOAD,
+        status_callback: Optional[Callable[[str], None]] = None,
+        state: Optional[Dict[str, Any]] = None,
+    ):
         self.device = device
         self.cpu_offload = cpu_offload
         self.status_callback = status_callback
+        self.state = state or {}
         self.mimi = None
         self.other_mimi = None
         self.lm = None
@@ -265,7 +333,10 @@ class PersonaPlexManager:
         self._optimizations_applied = False
         # Dedicated executor for sequential, low-jitter inference
         from concurrent.futures import ThreadPoolExecutor
-        self.step_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="personaplex_step")
+
+        self.step_executor = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="personaplex_step"
+        )
 
     def shutdown(self):
         """Shut down the manager and its executors."""
@@ -281,43 +352,27 @@ class PersonaPlexManager:
             except Exception:
                 pass
 
-    def _apply_optimizations(self):
-        """Apply torch.compile and CUDA graph optimizations based on config."""
-        if self._optimizations_applied:
-            return
-        self._optimizations_applied = True
-        opt = PERSONAPLEX_OPTIMIZE.lower()
-        
-        # 1. Set environment variables based on strategy
-        use_compile = (opt in ["auto", "compile", "graphs"])
-        use_graphs = (opt in ["auto", "graphs"])
-
-        if use_compile:
-            logger.info("PersonaPlexManager: enabling torch.compile (unsetting NO_TORCH_COMPILE).")
-            os.environ.pop("NO_TORCH_COMPILE", None)
-            os.environ.pop("TORCH_COMPILE_DISABLE", None)
-        else:
-            logger.info("PersonaPlexManager: disabling torch.compile.")
-            os.environ["NO_TORCH_COMPILE"] = "1"
-            os.environ["TORCH_COMPILE_DISABLE"] = "1"
-
-        if use_graphs:
-            logger.info("PersonaPlexManager: allowing CUDA graphs (unsetting NO_CUDA_GRAPH).")
-            os.environ.pop("NO_CUDA_GRAPH", None)
-            self._patch_cuda_graphs(disable=False)
-        else:
-            logger.info("PersonaPlexManager: disabling CUDA graphs.")
-            os.environ["NO_CUDA_GRAPH"] = "1"
-            self._patch_cuda_graphs(disable=True)
-
-        # 2. Fix Moshi's broken streaming propagation logic (even in eager mode)
+    def _apply_patches(self):
+        """Apply monkeypatches to moshi/personaplex source at runtime."""
+        # 1. Fix Moshi's broken streaming propagation logic (even in eager mode)
         try:
             import moshi.modules.streaming
-            if not getattr(moshi.modules.streaming.StreamingModule, "_is_patched", False):
+
+            if not getattr(
+                moshi.modules.streaming.StreamingModule, "_is_patched", False
+            ):
+
                 def patched_apply_named_streaming(self, fn):
-                    def _handle_module(module_inner: torch.nn.Module, prefix: str = "", recurse: bool = True, is_root: bool = False):
+                    def _handle_module(
+                        module_inner: torch.nn.Module,
+                        prefix: str = "",
+                        recurse: bool = True,
+                        is_root: bool = False,
+                    ):
                         propagate = True
-                        if isinstance(module_inner, moshi.modules.streaming.StreamingModule):
+                        if isinstance(
+                            module_inner, moshi.modules.streaming.StreamingModule
+                        ):
                             if module_inner._streaming_propagate or is_root:
                                 fn(prefix, module_inner)
                             else:
@@ -332,30 +387,103 @@ class PersonaPlexManager:
                     _handle_module(self, is_root=True, recurse=False)
                     for name, child in self.named_children():
                         _handle_module(child, prefix=name)
-                
-                moshi.modules.streaming.StreamingModule._apply_named_streaming = patched_apply_named_streaming
-                moshi.modules.streaming.StreamingModule._is_patched = True
-                logger.info("PersonaPlexManager: patched StreamingModule._apply_named_streaming.")
-        except Exception as e:
-            logger.warning("PersonaPlexManager: failed to patch moshi StreamingModule: %s", e)
 
-    def _patch_cuda_graphs(self, disable: bool):
-        """Patch moshi.models.lm.CUDAGraphed to set the disable flag."""
-        self._last_patch_disable = disable
+                moshi.modules.streaming.StreamingModule._apply_named_streaming = (
+                    patched_apply_named_streaming
+                )
+                moshi.modules.streaming.StreamingModule._is_patched = True
+                logger.info(
+                    "PersonaPlexManager: patched StreamingModule._apply_named_streaming."
+                )
+        except Exception as e:
+            logger.warning(
+                "PersonaPlexManager: failed to patch moshi StreamingModule: %s", e
+            )
+
+        # 2. Patch LMGen.load_voice_prompt_embeddings to force CPU load
         try:
             import moshi.models.lm
-            if getattr(moshi.models.lm.CUDAGraphed, "_is_patched", False):
-                return
-            original_init = moshi.models.lm.CUDAGraphed.__init__
-            def patched_init(self, func, warmup_steps=1, disable_orig=False, **kwargs):
-                # We ignore the model's 'disable' hint and use our global one
-                target_disable = kwargs.get('disable', disable_orig)
-                original_init(self, func, warmup_steps=warmup_steps, disable=disable)
-            moshi.models.lm.CUDAGraphed.__init__ = patched_init
-            moshi.models.lm.CUDAGraphed._is_patched = True
-            logger.info("PersonaPlexManager: patched moshi CUDAGraphed.")
+
+            if not getattr(moshi.models.lm.LMGen, "_is_patched", False):
+                original_load = moshi.models.lm.LMGen.load_voice_prompt_embeddings
+
+                def patched_load_voice_prompt_embeddings(self, path: str):
+                    self.voice_prompt = path
+                    import torch
+
+                    # Definitively load on CPU to avoid VRAM spikes during warmup
+                    state = torch.load(path, map_location=torch.device("cpu"))
+                    self.voice_prompt_audio = None
+                    self.voice_prompt_embeddings = state["embeddings"].to(
+                        self.lm_model.device
+                    )
+                    self.voice_prompt_cache = state["cache"].to(self.lm_model.device)
+
+                moshi.models.lm.LMGen.load_voice_prompt_embeddings = (
+                    patched_load_voice_prompt_embeddings
+                )
+                moshi.models.lm.LMGen._is_patched = True
+                logger.info(
+                    "PersonaPlexManager: patched LMGen.load_voice_prompt_embeddings (map_location='cpu')."
+                )
         except Exception as e:
-            logger.warning("PersonaPlexManager: failed to patch moshi CUDA graphs: %s", e)
+            logger.warning("PersonaPlexManager: failed to patch LMGen: %s", e)
+
+        # 3. Patch CUDAGraphed to set the disable flag based on config
+        try:
+            import moshi.models.lm
+
+            if not getattr(moshi.models.lm.CUDAGraphed, "_is_patched", False):
+                original_init = moshi.models.lm.CUDAGraphed.__init__
+                # We use a closure to capture the current optimization setting
+                target_disable = PERSONAPLEX_OPTIMIZE.lower() not in ["auto", "graphs"]
+
+                def patched_init(
+                    self, func, warmup_steps=1, disable_orig=False, **kwargs
+                ):
+                    original_init(
+                        self, func, warmup_steps=warmup_steps, disable=target_disable
+                    )
+
+                moshi.models.lm.CUDAGraphed.__init__ = patched_init
+                moshi.models.lm.CUDAGraphed._is_patched = True
+                logger.info(
+                    f"PersonaPlexManager: patched moshi CUDAGraphed (disable={target_disable})."
+                )
+        except Exception as e:
+            logger.warning(
+                "PersonaPlexManager: failed to patch moshi CUDAGraphed: %s", e
+            )
+
+    def _apply_optimizations(self):
+        """Apply torch.compile and CUDA graph optimizations based on config."""
+        if self._optimizations_applied:
+            return
+        self._optimizations_applied = True
+
+        # Apply monkeypatches first
+        self._apply_patches()
+
+        opt = PERSONAPLEX_OPTIMIZE.lower()
+
+        # Set environment variables based on strategy
+        use_compile = opt in ["auto", "compile", "graphs"]
+
+        if use_compile:
+            logger.info(
+                "PersonaPlexManager: enabling torch.compile (unsetting NO_TORCH_COMPILE)."
+            )
+            os.environ.pop("NO_TORCH_COMPILE", None)
+            os.environ.pop("TORCH_COMPILE_DISABLE", None)
+        else:
+            logger.info("PersonaPlexManager: disabling torch.compile.")
+            os.environ["NO_TORCH_COMPILE"] = "1"
+            os.environ["TORCH_COMPILE_DISABLE"] = "1"
+
+        if opt in ["auto", "graphs"]:
+            os.environ.pop("NO_CUDA_GRAPH", None)
+        else:
+            os.environ["NO_CUDA_GRAPH"] = "1"
 
     def _save_primed_state(self):
         """Snapshot the lm_gen streaming state after step_system_prompts.
@@ -367,7 +495,9 @@ class PersonaPlexManager:
         try:
             raw = self.lm_gen.get_streaming_state()
             self._lm_primed_state = _streaming_state_to_cpu(raw)
-            logger.debug("PersonaPlexManager: saved primed lm_gen streaming state (CPU).")
+            logger.debug(
+                "PersonaPlexManager: saved primed lm_gen streaming state (CPU)."
+            )
         except Exception as e:
             logger.warning("PersonaPlexManager: could not save primed state: %s", e)
             self._lm_primed_state = None
@@ -382,32 +512,46 @@ class PersonaPlexManager:
         if self._lm_primed_state is None:
             return False
         try:
+            # Ensure any stale KV cache from a previous turn is wiped before
+            # loading the clean primed state.
+            self.lm_gen.reset_streaming()
+
             gpu_state = _streaming_state_to_device(self._lm_primed_state, self.device)
             self.lm_gen.set_streaming_state(gpu_state)
             self.mimi.reset_streaming()
             self.other_mimi.reset_streaming()
-            logger.info("PersonaPlexManager: restored pre-warmed lm_gen state (no step_system_prompts needed).")
+            logger.info(
+                "PersonaPlexManager: restored pre-warmed lm_gen state (no step_system_prompts needed)."
+            )
             return True
         except Exception as e:
-            logger.warning("PersonaPlexManager: state restore failed, will re-run step_system_prompts: %s", e)
+            logger.warning(
+                "PersonaPlexManager: state restore failed, will re-run step_system_prompts: %s",
+                e,
+            )
             self._lm_primed_state = None
             return False
 
     def load(self):
         """Load models into VRAM if not already loaded."""
         global MimiModel, LMGen, loaders, sentencepiece, moshi_run_inference
-        
+        import torch
+
         if self.mimi is not None:
             return
-        
+
         # Apply optimizations BEFORE importing anything from moshi
         self._apply_optimizations()
-        
+
         try:
             from moshi.offline import run_inference as moshi_run_inference_loaded
-            from moshi.models import MimiModel as MimiModel_loaded, LMGen as LMGen_loaded, loaders as loaders_loaded
+            from moshi.models import (
+                MimiModel as MimiModel_loaded,
+                LMGen as LMGen_loaded,
+                loaders as loaders_loaded,
+            )
             import sentencepiece as sentencepiece_loaded
-            
+
             moshi_run_inference = moshi_run_inference_loaded
             MimiModel = MimiModel_loaded
             LMGen = LMGen_loaded
@@ -424,73 +568,172 @@ class PersonaPlexManager:
 
         vram_before = get_vram()
         self._status("PersonaPlexManager: starting in-process model load...")
+
+        quantize_type = getattr(_config, "PERSONAPLEX_QUANTIZE", "")
+        is_quantizing = quantize_type and quantize_type not in ("none", "None")
+
         with self._lock:
             from huggingface_hub import hf_hub_download
-            
+
+            # If quantizing, isolate GPU completely during the heavy weight load
+            original_cuda_visible = os.environ.get("CUDA_VISIBLE_DEVICES")
             try:
+                if is_quantizing:
+                    os.environ["CUDA_VISIBLE_DEVICES"] = ""
+                    if hasattr(torch, "set_default_device"):
+                        torch.set_default_device("cpu")
+
                 # 1) Load Mimi
                 start = time.perf_counter()
                 self._status("PersonaPlexManager: loading mimi...")
                 mimi_weight = hf_hub_download(self.repo, loaders.MIMI_NAME)
-                self.mimi = loaders.get_mimi(mimi_weight, self.device)
-                self.other_mimi = loaders.get_mimi(mimi_weight, self.device)
+                # Load on CPU first to keep VRAM free for the large LM load
+                self.mimi = loaders.get_mimi(mimi_weight, "cpu")
+                self.other_mimi = loaders.get_mimi(mimi_weight, "cpu")
                 dur = time.perf_counter() - start
                 vram_now = get_vram()
-                self._status(f"PersonaPlexManager: mimi loaded in {dur:.1f}s (VRAM: {vram_now:.2f}GB, +{vram_now-vram_before:.2f}GB)")
+                self._status(
+                    f"PersonaPlexManager: mimi loaded in {dur:.1f}s (VRAM: {vram_now:.2f}GB, +{0:.2f}GB)"
+                )
                 vram_before = vram_now
-                
+
                 # 2) Load tokenizer
                 start = time.perf_counter()
                 self._status("PersonaPlexManager: loading tokenizer...")
                 tokenizer_path = hf_hub_download(self.repo, loaders.TEXT_TOKENIZER_NAME)
-                self.text_tokenizer = sentencepiece.SentencePieceProcessor(tokenizer_path)
+                self.text_tokenizer = sentencepiece.SentencePieceProcessor(
+                    tokenizer_path
+                )
                 dur = time.perf_counter() - start
                 vram_now = get_vram()
-                self._status(f"PersonaPlexManager: tokenizer loaded in {dur:.1f}s (VRAM: {vram_now:.2f}GB, +{vram_now-vram_before:.2f}GB)")
+                self._status(
+                    f"PersonaPlexManager: tokenizer loaded in {dur:.1f}s (VRAM: {vram_now:.2f}GB, +{vram_now-vram_before:.2f}GB)"
+                )
                 vram_before = vram_now
-                
+
                 # 3) Load Moshi LM
                 start = time.perf_counter()
                 self._status("PersonaPlexManager: loading moshi lm...")
-                moshi_weight = hf_hub_download(self.repo, loaders.MOSHI_NAME)
-                # Ensure device is correctly passed and cpu_offload is handled
-                self.lm = loaders.get_moshi_lm(moshi_weight, device=self.device, cpu_offload=self.cpu_offload)
+
+                # Determine repo and filename based on quantization
+                target_repo = self.repo
+                target_filename = loaders.MOSHI_NAME
+                if quantize_type == "4bit":
+                    target_repo = "brianmatzelle/personaplex-7b-v1-bnb-4bit"
+                    target_filename = "model_bnb_4bit.pt"
+                    self._status(
+                        f"PersonaPlexManager: using pre-quantized model from {target_repo}"
+                    )
+
+                moshi_weight = hf_hub_download(target_repo, target_filename)
+
+                # Explicit cleanup before 14GB payload load
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+
+                if is_quantizing:
+                    self._status(
+                        "PersonaPlexManager: definitive CPU weight load (safetensors only)..."
+                    )
+                    from safetensors.torch import load_file as st_load_file
+
+                    # Convert to safetensors if it's a .pt file, then load to CPU
+                    if not moshi_weight.endswith(".safetensors"):
+                        self._status(
+                            "PersonaPlexManager: converting .pt to .safetensors for CPU load..."
+                        )
+                        temp_sd = torch.load(moshi_weight, map_location="cpu")
+                        if "model" in temp_sd:
+                            temp_sd = temp_sd["model"]
+                        from safetensors.torch import save_file
+
+                        st_path = moshi_weight + ".safetensors"
+                        save_file(temp_sd, st_path)
+                        moshi_weight = st_path
+                        del temp_sd
+                        gc.collect()
+
+                    state_dict = st_load_file(moshi_weight, device="cpu")
+
+                    lm_kwargs = dict(loaders._lm_kwargs)
+                    lm_kwargs["dep_q"] = 16
+                    from moshi.models.lm import LMModel
+
+                    self.lm = LMModel(device="cpu", dtype=torch.bfloat16, **lm_kwargs)
+                    self.lm.load_state_dict(state_dict, strict=False, assign=True)
+                    del state_dict
+                    gc.collect()
+                else:
+                    self.lm = loaders.get_moshi_lm(
+                        moshi_weight, device=self.device, cpu_offload=self.cpu_offload
+                    )
+
                 self.lm.eval()
-                if not self.cpu_offload:
-                    self.lm.to(self.device)
                 dur = time.perf_counter() - start
                 vram_now = get_vram()
-                self._status(f"PersonaPlexManager: moshi loaded in {dur:.1f}s (VRAM: {vram_now:.2f}GB, +{vram_now-vram_before:.2f}GB)")
-                
-                # Streaming forever setup
-                self.mimi.streaming_forever(1)
-                self.other_mimi.streaming_forever(1)
-                
-                # Warm generator setup
-                self.lm_gen = LMGen(
-                    self.lm,
-                    audio_silence_frame_cnt=int(0.5 * self.mimi.frame_rate),
-                    sample_rate=self.mimi.sample_rate,
-                    device=self.device,
-                    frame_rate=self.mimi.frame_rate,
-                    save_voice_prompt_embeddings=False,
-                    use_sampling=True,
-                    temp=0.8,
-                    temp_text=0.7,
-                    top_k=1,
-                    top_k_text=1,
+                self._status(
+                    f"PersonaPlexManager: moshi loaded in {dur:.1f}s (VRAM: {vram_now:.2f}GB, +{vram_now-vram_before:.2f}GB)"
                 )
-                self.lm_gen.streaming_forever(1)
-                
-                self._status("PersonaPlexManager: models and warm generator loaded and ready.")
-                
-                # Pre-warm voice prompt so the first inference skips the 26s setup.
-                try:
-                    from moshi.offline import wrap_with_system_tags
-                    self._status("PersonaPlexManager: warming up voice prompt (first inference will be instant)...")
-                    voice_prompt_path = PERSONAPLEX_VOICE_PROMPT
-                    final_voice_prompt = _ensure_voice_prompt_exists(voice_prompt_path)
-                    if final_voice_prompt.endswith('.pt'):
+
+            finally:
+                if is_quantizing:
+                    if original_cuda_visible is not None:
+                        os.environ["CUDA_VISIBLE_DEVICES"] = original_cuda_visible
+                    else:
+                        os.environ.pop("CUDA_VISIBLE_DEVICES", None)
+                    if hasattr(torch, "set_default_device"):
+                        torch.set_default_device(self.device)
+
+            if is_quantizing:
+                from quantize import quantize_model_after_load
+
+                self._status(
+                    f"PersonaPlexManager: applying {quantize_type} quantization (moving to {self.device})..."
+                )
+                self.lm = quantize_model_after_load(
+                    self.lm, quantize_type, device=self.device
+                )
+
+                # Move Mimi to GPU now that LM is safely loaded/quantized
+                self.mimi.to(self.device)
+                self.other_mimi.to(self.device)
+
+            # Streaming forever setup
+            self.mimi.streaming_forever(1)
+            self.other_mimi.streaming_forever(1)
+
+            # Warm generator setup
+            self.lm_gen = LMGen(
+                self.lm,
+                audio_silence_frame_cnt=int(0.5 * self.mimi.frame_rate),
+                sample_rate=self.mimi.sample_rate,
+                device=self.device,
+                frame_rate=self.mimi.frame_rate,
+                save_voice_prompt_embeddings=False,
+                use_sampling=True,
+                temp=0.7,
+                temp_text=0.0,  # Greedy text
+                top_k=50,
+                top_k_text=1,  # Greedy text
+            )
+            self.lm_gen.streaming_forever(1)
+
+            self._status(
+                "PersonaPlexManager: models and warm generator loaded and ready."
+            )
+
+            # Pre-warm voice prompt so the first inference skips the 26s setup.
+            try:
+                from moshi.offline import wrap_with_system_tags
+
+                self._status(
+                    "PersonaPlexManager: warming up voice prompt (first inference will be instant)..."
+                )
+                voice_prompt_path = PERSONAPLEX_VOICE_PROMPT
+                final_voice_prompt = _ensure_voice_prompt_exists(voice_prompt_path)
+                with torch.no_grad():
+                    if final_voice_prompt.endswith(".pt"):
                         self.lm_gen.load_voice_prompt_embeddings(final_voice_prompt)
                     else:
                         self.lm_gen.load_voice_prompt(final_voice_prompt)
@@ -502,18 +745,25 @@ class PersonaPlexManager:
                     self.lm_gen.reset_streaming()
                     self.lm_gen.step_system_prompts(self.mimi)
                     self.mimi.reset_streaming()  # Reset mimi encode state (matches offline.py behavior)
-                    self._primed = True
-                    self._primed_for = voice_prompt_path  # Only voice identity matters for primed check
-                    self._save_primed_state()  # Snapshot KV cache for fast restore on every call
-                    self._status("PersonaPlexManager: voice prompt warmed up and ready.")
-                except Exception as warm_err:
-                    logger.warning("PersonaPlexManager: voice prompt warmup failed (will warm on first inference): %s", warm_err)
-                    self._primed = False
+                self._primed = True
+                self._primed_for = (
+                    voice_prompt_path  # Only voice identity matters for primed check
+                )
+                self._save_primed_state()  # Snapshot KV cache for fast restore on every call
+                self._status("PersonaPlexManager: voice prompt warmed up and ready.")
+            except Exception as warm_err:
+                logger.warning(
+                    "PersonaPlexManager: voice prompt warmup failed (will warm on first inference): %s",
+                    warm_err,
+                )
+                self._primed = False
             except Exception as e:
                 logger.exception("PersonaPlexManager: failed to load models: %s", e)
                 raise
 
-    def create_session(self, text_prompt: str, voice_prompt_path: str) -> PersonaPlexStreamingSession:
+    def create_session(
+        self, text_prompt: str, voice_prompt_path: str
+    ) -> PersonaPlexStreamingSession:
         """Create a new streaming session."""
         return PersonaPlexStreamingSession(self, text_prompt, voice_prompt_path)
 
@@ -529,60 +779,86 @@ class PersonaPlexManager:
                 "cuda_graphs": getattr(self, "_last_patch_disable", None) is False,
             }
 
-    async def infer_async(self, text_prompt: str, voice_prompt_path: str, input_wav_path: str, output_wav_path: str, output_text_path: Optional[str] = None):
+    async def infer_async(
+        self,
+        text_prompt: str,
+        voice_prompt_path: str,
+        input_wav_path: str,
+        output_wav_path: str,
+        output_text_path: Optional[str] = None,
+    ):
         """Run a single inference turn asynchronously."""
-        return await asyncio.to_thread(self.infer, text_prompt, voice_prompt_path, input_wav_path, output_wav_path, output_text_path)
+        return await asyncio.to_thread(
+            self.infer,
+            text_prompt,
+            voice_prompt_path,
+            input_wav_path,
+            output_wav_path,
+            output_text_path,
+        )
 
-    def infer_stream(self, text_prompt: str, voice_prompt_path: str, input_wav_path: str):
+    def infer_stream(
+        self, text_prompt: str, voice_prompt_path: str, input_wav_path: str
+    ):
         """Generator that yields audio chunks as they are produced."""
+        import torch
         import moshi.models.lm
+
         self._apply_optimizations()
         self.load()
         from moshi.offline import wrap_with_system_tags
-        
+
         final_text_prompt = text_prompt or PERSONAPLEX_TEXT_PROMPT
         final_voice_prompt = _ensure_voice_prompt_exists(voice_prompt_path)
 
-        with self._lock:
+        with torch.no_grad(), self._lock:
             if self._restore_primed_state():
                 # KV cache restored; just update utterance tokens
-                self.lm_gen.text_prompt_tokens = self.text_tokenizer.encode(wrap_with_system_tags(final_text_prompt))
+                self.lm_gen.text_prompt_tokens = self.text_tokenizer.encode(
+                    wrap_with_system_tags(final_text_prompt)
+                )
             else:
                 # Full setup: load prompts, reset streaming state, run warmup
-                if final_voice_prompt.endswith('.pt'):
+                if final_voice_prompt.endswith(".pt"):
                     self.lm_gen.load_voice_prompt_embeddings(final_voice_prompt)
                 else:
                     self.lm_gen.load_voice_prompt(final_voice_prompt)
-                self.lm_gen.text_prompt_tokens = self.text_tokenizer.encode(wrap_with_system_tags(final_text_prompt))
+                self.lm_gen.text_prompt_tokens = self.text_tokenizer.encode(
+                    wrap_with_system_tags(final_text_prompt)
+                )
                 self.mimi.reset_streaming()
                 self.other_mimi.reset_streaming()
                 self.lm_gen.reset_streaming()
                 self.lm_gen.step_system_prompts(self.mimi)
                 self.mimi.reset_streaming()  # Reset mimi encode state (matches offline.py behavior)
                 self._save_primed_state()
-            
+
             # Process input WAV
             input_data, _ = sf.read(input_wav_path, dtype="float32")
             if input_data.ndim > 1:
                 input_data = input_data.mean(-1)
-            
+
             frame_size = int(self.mimi.sample_rate / self.mimi.frame_rate)
             chunk_size = frame_size
             for i in range(0, len(input_data), chunk_size):
                 chunk = input_data[i : i + chunk_size]
                 if len(chunk) < chunk_size:
                     chunk = np.pad(chunk, (0, chunk_size - len(chunk)))
-                
+
                 chunk = np.ascontiguousarray(chunk)
-                chunk_ts = torch.from_numpy(chunk).to(self.device).unsqueeze(0).unsqueeze(0)
+                chunk_ts = (
+                    torch.from_numpy(chunk).to(self.device).unsqueeze(0).unsqueeze(0)
+                )
                 codes = self.mimi.encode(chunk_ts)
-                
+                _ = self.other_mimi.encode(chunk_ts)  # state sync only — discard
+
                 tokens = self.lm_gen.step(codes)
                 if tokens is None:
                     continue
-                
-                # Decode and yield audio chunk
-                out_pcm = self.other_mimi.decode(tokens[:, 1 : self.lm.dep_q + 1])
+
+                # Use mimi for decode; other_mimi discard keeps its state in sync
+                out_pcm = self.mimi.decode(tokens[:, 1 : self.lm.dep_q + 1])
+                _ = self.other_mimi.decode(tokens[:, 1 : self.lm.dep_q + 1])
                 pcm_np = out_pcm.cpu().detach().numpy().squeeze()
                 yield pcm_np
 
@@ -595,17 +871,19 @@ class PersonaPlexManager:
         This is the same mechanism used internally by step_system_prompts/_step_text_prompt
         but with the audio output captured for playback.
         """
+        import torch
+
         self._apply_optimizations()
         self.load()
 
         final_voice_prompt = _ensure_voice_prompt_exists(voice_prompt_path)
 
-        with self._lock:
+        with torch.no_grad(), self._lock:
             if self._restore_primed_state():
                 pass  # KV cache restored; mimi/other_mimi already reset inside helper
             else:
                 # First call or restore failed: run full setup then save state for next time
-                if final_voice_prompt.endswith('.pt'):
+                if final_voice_prompt.endswith(".pt"):
                     self.lm_gen.load_voice_prompt_embeddings(final_voice_prompt)
                 else:
                     self.lm_gen.load_voice_prompt(final_voice_prompt)
@@ -619,7 +897,9 @@ class PersonaPlexManager:
             # Encode the text WITHOUT system tags — these are the words to speak
             text_tokens = self.text_tokenizer.encode(text)
             # Pre-computed sine token tensor for user audio channel
-            sine_frame = self.lm_gen._encode_sine_frame()  # user "input" for context [1,8,1]
+            sine_frame = (
+                self.lm_gen._encode_sine_frame()
+            )  # user "input" for context [1,8,1]
 
             # Teacher-force each text token; do NOT provide moshi_tokens so the depformer
             # samples audio autoregressively (providing zero_frame would force silence output).
@@ -630,11 +910,18 @@ class PersonaPlexManager:
                 )
                 if tokens is None:
                     continue
+
+                # Captured piece from teacher-forcing
+                piece = self.text_tokenizer.IdToPiece(text_token)
+
                 out_pcm = self.mimi.decode(tokens[:, 1 : self.lm.dep_q + 1])
                 pcm_np = out_pcm.cpu().detach().numpy().squeeze()
-                logger.debug("tts_stream: frame amp max=%.6f tok=%d",
-                             float(np.abs(pcm_np).max()), text_token)
-                yield pcm_np
+                logger.debug(
+                    "tts_stream: frame amp max=%.6f tok=%d",
+                    float(np.abs(pcm_np).max()),
+                    text_token,
+                )
+                yield pcm_np, piece
 
             # Run a few silence frames to flush trailing audio (codec has lookahead delay)
             for _ in range(self.lm_gen.audio_silence_frame_cnt):
@@ -645,59 +932,84 @@ class PersonaPlexManager:
                 if tokens is None:
                     continue
                 out_pcm = self.mimi.decode(tokens[:, 1 : self.lm.dep_q + 1])
-                yield out_pcm.cpu().detach().numpy().squeeze()
+                yield out_pcm.cpu().detach().numpy().squeeze(), ""
 
-    def infer(self, text_prompt: str, voice_prompt_path: str, input_wav_path: str, output_wav_path: str, output_text_path: Optional[str] = None):
+    def infer(
+        self,
+        text_prompt: str,
+        voice_prompt_path: str,
+        input_wav_path: str,
+        output_wav_path: str,
+        output_text_path: Optional[str] = None,
+    ):
         """Synchronous inference implementation using the warm models."""
-        logger.info("PersonaPlexManager: starting inference for prompt: %s", text_prompt[:100])
+        import torch
+
+        logger.info(
+            "PersonaPlexManager: starting inference for prompt: %s", text_prompt[:100]
+        )
         import moshi.models.lm
-        
+
         # Apply optimizations based on strategy
         self._apply_optimizations()
-        
+
         self.load()
         from moshi.offline import warmup, wrap_with_system_tags
-        
+
         # Use provided prompt or default
         final_text_prompt = text_prompt or PERSONAPLEX_TEXT_PROMPT
-        
+
         # Resolve voice prompt path
         final_voice_prompt = _ensure_voice_prompt_exists(voice_prompt_path)
-            
-        logger.debug("PersonaPlexManager: using voice prompt path: %s", final_voice_prompt)
 
-        with self._lock:
+        logger.debug(
+            "PersonaPlexManager: using voice prompt path: %s", final_voice_prompt
+        )
+
+        with torch.no_grad(), self._lock:
             if self._restore_primed_state():
                 # KV cache restored; just update utterance tokens
-                self.lm_gen.text_prompt_tokens = self.text_tokenizer.encode(wrap_with_system_tags(final_text_prompt))
+                self.lm_gen.text_prompt_tokens = self.text_tokenizer.encode(
+                    wrap_with_system_tags(final_text_prompt)
+                )
                 if PERSONAPLEX_USE_CUDA_GRAPHS:
                     frame_size = int(self.mimi.sample_rate / self.mimi.frame_rate)
-                    warmup(self.mimi, self.other_mimi, self.lm_gen, self.device, frame_size)
+                    warmup(
+                        self.mimi, self.other_mimi, self.lm_gen, self.device, frame_size
+                    )
             else:
                 # Full setup: load prompts, reset streaming, run warmup
                 if PERSONAPLEX_USE_CUDA_GRAPHS:
                     frame_size = int(self.mimi.sample_rate / self.mimi.frame_rate)
-                    warmup(self.mimi, self.other_mimi, self.lm_gen, self.device, frame_size)
-                if final_voice_prompt.endswith('.pt'):
+                    warmup(
+                        self.mimi, self.other_mimi, self.lm_gen, self.device, frame_size
+                    )
+                if final_voice_prompt.endswith(".pt"):
                     self.lm_gen.load_voice_prompt_embeddings(final_voice_prompt)
                 else:
                     self.lm_gen.load_voice_prompt(final_voice_prompt)
-                self.lm_gen.text_prompt_tokens = self.text_tokenizer.encode(wrap_with_system_tags(final_text_prompt))
+                self.lm_gen.text_prompt_tokens = self.text_tokenizer.encode(
+                    wrap_with_system_tags(final_text_prompt)
+                )
                 self.mimi.reset_streaming()
                 self.other_mimi.reset_streaming()
                 self.lm_gen.reset_streaming()
                 self.lm_gen.step_system_prompts(self.mimi)
                 self.mimi.reset_streaming()  # Reset mimi encode state (matches offline.py behavior)
                 self._save_primed_state()
-            
+
             # Process input WAV
             import soundfile as sf
+
             input_data, _ = sf.read(input_wav_path, dtype="float32")
             if input_data.ndim > 1:
                 input_data = input_data.mean(-1)
-            
+
             frame_size = int(self.mimi.sample_rate / self.mimi.frame_rate)
-            logger.info("PersonaPlexManager: processing input audio (%d samples)...", len(input_data))
+            logger.info(
+                "PersonaPlexManager: processing input audio (%d samples)...",
+                len(input_data),
+            )
             all_out_pcms = []
             all_text_tokens = []
             chunk_size = frame_size
@@ -705,81 +1017,180 @@ class PersonaPlexManager:
                 chunk = input_data[i : i + chunk_size]
                 if len(chunk) < chunk_size:
                     chunk = np.pad(chunk, (0, chunk_size - len(chunk)))
-                
+
                 # Ensure contiguous for torch.from_numpy
                 chunk = np.ascontiguousarray(chunk)
-                chunk_ts = torch.from_numpy(chunk).to(self.device).unsqueeze(0).unsqueeze(0)
+                chunk_ts = (
+                    torch.from_numpy(chunk).to(self.device).unsqueeze(0).unsqueeze(0)
+                )
                 codes = self.mimi.encode(chunk_ts)
-                
+                _ = self.other_mimi.encode(chunk_ts)  # state sync only — discard
+
                 # Single step
                 tokens = self.lm_gen.step(codes)
-                
+
                 # Capture text tokens (k=0)
                 text_token = tokens[0, 0].item()
-                if text_token not in {0, 1, 2, 3}: # Skip BOS/EOS/PAD
+                if text_token not in {0, 1, 2, 3}:  # Skip BOS/EOS/PAD
                     piece = self.text_tokenizer.IdToPiece(text_token)
                     all_text_tokens.append(piece)
 
-                # Decode agent tokens (k=1..dep_q+1)
-                # dep_q is the number of audio codebooks
-                out_pcm = self.other_mimi.decode(tokens[:, 1 : self.lm.dep_q + 1])
+                # Use mimi for decode; other_mimi discard keeps its state in sync
+                out_pcm = self.mimi.decode(tokens[:, 1 : self.lm.dep_q + 1])
+                _ = self.other_mimi.decode(tokens[:, 1 : self.lm.dep_q + 1])
                 all_out_pcms.append(out_pcm.cpu().detach().numpy().squeeze())
-            
+
             if all_out_pcms:
                 res = np.concatenate(all_out_pcms)
                 sf.write(output_wav_path, res, self.mimi.sample_rate)
-                logger.info("PersonaPlexManager: saved generated audio to %s", output_wav_path)
-            
+                logger.info(
+                    "PersonaPlexManager: saved generated audio to %s", output_wav_path
+                )
+
             if output_text_path:
                 with open(output_text_path, "w", encoding="utf-8") as f:
                     json.dump(all_text_tokens, f)
-                logger.debug("PersonaPlexManager: saved generated text tokens to %s", output_text_path)
-            
+                logger.debug(
+                    "PersonaPlexManager: saved generated text tokens to %s",
+                    output_text_path,
+                )
+
             return output_wav_path
 
-    def hear_stream(self, heard_text: str, voice_prompt_path: str):
-        """Conversational inference: synthesise *heard_text* as user speech,
-        feed it to PersonaPlex, and yield PCM frames of the agent's spoken reply.
+    def hear_stream(
+        self, heard_text: str, voice_prompt_path: str, user_wav_path: str = None
+    ):
+        """Conversational inference: feed user speech to PersonaPlex, yield (PCM, text) chunks.
 
-        Unlike tts_stream (which teacher-forces the LM to say specific words),
-        this uses the full conversational path: the model *hears* the user
+        If *user_wav_path* is given, that audio file is used as the user's voice input.
+        Otherwise *heard_text* is synthesised to speech via text_to_wav().
+
+        This uses the full conversational path: the model *hears* the user
         speaking and generates its natural response in the PersonaPlex voice.
-
-        Yields numpy float32 arrays (one per mimi frame, 1920 samples @ 24 kHz).
+        Yields chunks as they are generated (zero-latency).
         """
+        import torch
         import tempfile as _tempfile
+        from moshi.offline import wrap_with_system_tags
+
+        _TRAILING_SILENCE_S = (
+            4.0  # seconds of silence after speech — gives model time to respond
+        )
+        _LEADING_SILENCE_AMP = 0.02  # skip leading output frames that are nearly silent
+        _sample_rate = int(self.mimi.sample_rate)
 
         with _tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as _f:
             user_wav = _f.name
-        with _tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as _f:
-            agent_wav = _f.name
         try:
-            text_to_wav(heard_text, user_wav, sample_rate=int(self.mimi.sample_rate))
-            self.infer(
-                text_prompt=PERSONAPLEX_TEXT_PROMPT,
-                voice_prompt_path=voice_prompt_path,
-                input_wav_path=user_wav,
-                output_wav_path=agent_wav,
+            if user_wav_path:
+                _convert_to_wav(user_wav_path, user_wav, sample_rate=_sample_rate)
+            else:
+                text_to_wav(heard_text, user_wav, sample_rate=_sample_rate)
+
+            # Process input WAV
+            input_data, _ = sf.read(user_wav, dtype="float32")
+            if input_data.ndim > 1:
+                input_data = input_data.mean(-1)
+
+            # Append trailing silence so the model has time to formulate a response.
+            trailing = np.zeros(
+                int(_sample_rate * _TRAILING_SILENCE_S), dtype=np.float32
             )
-            if os.path.exists(agent_wav):
-                data, _ = sf.read(agent_wav, dtype="float32")
-                # Yield frame-sized chunks matching mimi's output stride
-                frame = int(self.mimi.sample_rate / self.mimi.frame_rate)
-                for i in range(0, len(data), frame):
-                    yield data[i : i + frame].astype(np.float32)
+            full_input = np.concatenate([input_data, trailing])
+            user_speech_samples = len(input_data)
+
+            self._apply_optimizations()
+            self.load()
+
+            final_voice_prompt = _ensure_voice_prompt_exists(voice_prompt_path)
+
+            with torch.no_grad(), self._lock:
+                if self._restore_primed_state():
+                    self.lm_gen.text_prompt_tokens = self.text_tokenizer.encode(
+                        wrap_with_system_tags(PERSONAPLEX_TEXT_PROMPT)
+                    )
+                else:
+                    if final_voice_prompt.endswith(".pt"):
+                        self.lm_gen.load_voice_prompt_embeddings(final_voice_prompt)
+                    else:
+                        self.lm_gen.load_voice_prompt(final_voice_prompt)
+                    self.lm_gen.text_prompt_tokens = self.text_tokenizer.encode(
+                        wrap_with_system_tags(PERSONAPLEX_TEXT_PROMPT)
+                    )
+                    self.mimi.reset_streaming()
+                    self.other_mimi.reset_streaming()
+                    self.lm_gen.reset_streaming()
+                    self.lm_gen.step_system_prompts(self.mimi)
+                    self.mimi.reset_streaming()
+                    self._save_primed_state()
+
+                frame_size = int(self.mimi.sample_rate / self.mimi.frame_rate)
+                found_speech = False
+
+                for i in range(0, len(full_input), frame_size):
+                    chunk = full_input[i : i + frame_size]
+                    if len(chunk) < frame_size:
+                        chunk = np.pad(chunk, (0, frame_size - len(chunk)))
+
+                    chunk = np.ascontiguousarray(chunk)
+                    chunk_ts = (
+                        torch.from_numpy(chunk)
+                        .to(self.device)
+                        .unsqueeze(0)
+                        .unsqueeze(0)
+                    )
+                    codes = self.mimi.encode(chunk_ts)
+                    _ = self.other_mimi.encode(chunk_ts)
+
+                    tokens = self.lm_gen.step(codes)
+                    if tokens is None:
+                        continue
+
+                    # Capture text token
+                    piece = ""
+                    text_token = tokens[0, 0].item()
+                    if text_token not in {0, 1, 2, 3}:
+                        piece = self.text_tokenizer.IdToPiece(text_token)
+
+                    # Decode audio
+                    out_pcm = self.mimi.decode(tokens[:, 1 : self.lm.dep_q + 1])
+                    _ = self.other_mimi.decode(tokens[:, 1 : self.lm.dep_q + 1])
+                    pcm_np = out_pcm.cpu().detach().numpy().squeeze()
+
+                    # In full-duplex mode only play output from the silence window
+                    # (after user speech ends) where the model actually responds.
+                    if i >= user_speech_samples:
+                        if (
+                            not found_speech
+                            and float(np.abs(pcm_np).max()) < _LEADING_SILENCE_AMP
+                        ):
+                            continue
+                        found_speech = True
+                        yield pcm_np, piece
+                    else:
+                        # Even if we don't yield PCM, we might want to track text tokens
+                        # generated during the "listening" phase (though usually empty).
+                        if piece:
+                            yield None, piece
+
         finally:
-            for p in (user_wav, agent_wav):
-                if os.path.exists(p):
-                    os.unlink(p)
+            if os.path.exists(user_wav):
+                os.unlink(user_wav)
 
 
 class AudioMultiplexer:
     """Captures microphone audio and broadcasts chunks to multiple subscribers."""
-    
-    def __init__(self, sample_rate: int = VOICE_SAMPLE_RATE, chunk_seconds: float = VOICE_CHUNK_SECONDS):
+
+    def __init__(
+        self,
+        sample_rate: int = VOICE_SAMPLE_RATE,
+        chunk_seconds: float = VOICE_CHUNK_SECONDS,
+    ):
         self.sample_rate = sample_rate
         self.chunk_seconds = chunk_seconds
-        self.subscribers: Set[Tuple[asyncio.Queue, Optional[asyncio.AbstractEventLoop]]] = set()
+        self.subscribers: Set[
+            Tuple[asyncio.Queue, Optional[asyncio.AbstractEventLoop]]
+        ] = set()
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._lock = threading.Lock()
@@ -828,7 +1239,7 @@ class AudioMultiplexer:
         def callback(indata, frames, time, status):
             if status:
                 logger.warning("AudioMultiplexer status: %s", status)
-            
+
             chunk = indata.copy().squeeze()
             with self._lock:
                 for queue, loop in self.subscribers:
@@ -841,7 +1252,12 @@ class AudioMultiplexer:
                             pass
 
         try:
-            with sd.InputStream(samplerate=self.sample_rate, channels=1, callback=callback, blocksize=int(self.sample_rate * self.chunk_seconds)):
+            with sd.InputStream(
+                samplerate=self.sample_rate,
+                channels=1,
+                callback=callback,
+                blocksize=int(self.sample_rate * self.chunk_seconds),
+            ):
                 while not self._stop_event.is_set():
                     self._stop_event.wait(0.1)
         except Exception as e:
@@ -852,12 +1268,14 @@ class AudioMultiplexer:
 
 class RollingAudioBuffer:
     """Subscriber to AudioMultiplexer that maintains a rolling window of recent audio."""
-    
+
     def __init__(self, multiplexer: AudioMultiplexer, max_seconds: float = 10.0):
         self.multiplexer = multiplexer
         self.max_seconds = max_seconds
         self.sample_rate = multiplexer.sample_rate
-        self.buffer = collections.deque(maxlen=int(max_seconds / multiplexer.chunk_seconds))
+        self.buffer = collections.deque(
+            maxlen=int(max_seconds / multiplexer.chunk_seconds)
+        )
         self._queue = None
         self._task = None
         self._stop_event = asyncio.Event()
@@ -905,18 +1323,24 @@ def set_audio_devices(input_id: Optional[int] = None, output_id: Optional[int] =
         sd.default.device[0] = input_id
     if output_id is not None:
         sd.default.device[1] = output_id
-    logger.info("Audio devices updated: input=%s, output=%s", sd.default.device[0], sd.default.device[1])
+    logger.info(
+        "Audio devices updated: input=%s, output=%s",
+        sd.default.device[0],
+        sd.default.device[1],
+    )
 
 
 def play_test_tone(duration: float = 1.0, freq: float = 440.0):
     """Play a test tone to verify audio output hardware."""
+    import torch
+
     if sd is None:
         raise RuntimeError("sounddevice is not installed; cannot play tone.")
-    
+
     # Log current default or set device
     dev_idx = sd.default.device[1]
     logger.info("Playing test tone on output device index: %s", dev_idx)
-    
+
     samples = int(duration * VOICE_SAMPLE_RATE)
     t = np.linspace(0, duration, samples, endpoint=False)
     tone = 0.3 * np.sin(2 * np.pi * freq * t)
@@ -926,6 +1350,7 @@ def play_test_tone(duration: float = 1.0, freq: float = 440.0):
 
 class DebugServer:
     """A lightweight JSON socket server for live interaction and monitoring."""
+
     def __init__(self, host="127.0.0.1", port=9999, command_handler=None, state=None):
         self.host = host
         self.port = port
@@ -934,13 +1359,15 @@ class DebugServer:
         self._server = None
 
     async def start(self):
-        self._server = await asyncio.start_server(self._handle_client, self.host, self.port)
+        self._server = await asyncio.start_server(
+            self._handle_client, self.host, self.port
+        )
         logger.info(f"DebugServer: listening on {self.host}:{self.port}")
         async with self._server:
             await self._server.serve_forever()
 
     async def _handle_client(self, reader, writer):
-        addr = writer.get_extra_info('peername')
+        addr = writer.get_extra_info("peername")
         logger.debug(f"DebugServer: accepted connection from {addr}")
         try:
             while True:
@@ -950,32 +1377,101 @@ class DebugServer:
                 line = data.decode().strip()
                 if not line:
                     continue
-                
+
                 try:
                     payload = json.loads(line)
                     msg_type = payload.get("type", "command")
-                    
+
                     if msg_type == "command" and self.command_handler:
                         cmd = payload.get("data")
                         logger.info(f"DebugServer: injecting command: {cmd}")
                         # Wrap in task to not block the reader
                         asyncio.create_task(self.command_handler(cmd))
-                        writer.write(json.dumps({"status": "ok", "message": f"Command '{cmd}' enqueued"}).encode() + b"\n")
+                        writer.write(
+                            json.dumps(
+                                {"status": "ok", "message": f"Command '{cmd}' enqueued"}
+                            ).encode()
+                            + b"\n"
+                        )
                     elif msg_type == "state":
                         # Convert state to something JSON-serializable if needed
-                        serializable_state = {k: v for k, v in self.state.items() if isinstance(v, (str, int, float, bool, list, dict, type(None)))}
-                        writer.write(json.dumps({"status": "ok", "state": serializable_state}).encode() + b"\n")
+                        serializable_state = {
+                            k: v
+                            for k, v in self.state.items()
+                            if isinstance(
+                                v, (str, int, float, bool, list, dict, type(None))
+                            )
+                        }
+                        writer.write(
+                            json.dumps(
+                                {"status": "ok", "state": serializable_state}
+                            ).encode()
+                            + b"\n"
+                        )
                     else:
-                        writer.write(json.dumps({"status": "error", "message": "Unknown request type"}).encode() + b"\n")
+                        writer.write(
+                            json.dumps(
+                                {"status": "error", "message": "Unknown request type"}
+                            ).encode()
+                            + b"\n"
+                        )
                 except Exception as e:
-                    writer.write(json.dumps({"status": "error", "message": str(e)}).encode() + b"\n")
-                
+                    writer.write(
+                        json.dumps({"status": "error", "message": str(e)}).encode()
+                        + b"\n"
+                    )
+
                 await writer.drain()
         except Exception as e:
             logger.error(f"DebugServer client error: {e}")
         finally:
             writer.close()
             await writer.wait_closed()
+
+
+def _convert_to_wav(src_path: str, dst_path: str, sample_rate: int = 24000) -> None:
+    """Convert *src_path* (any ffmpeg-supported format) to mono WAV at *sample_rate* Hz.
+
+    Uses ffmpeg subprocess so it handles M4A, MP3, FLAC, OGG, etc.
+    Falls back to soundfile + torchaudio resample for plain WAV inputs.
+    """
+    ext = os.path.splitext(src_path)[1].lower()
+    if ext == ".wav":
+        # Already WAV — read, ensure mono + correct rate, write out
+        import torchaudio, torch as _torch
+
+        data, sr = sf.read(src_path, dtype="float32", always_2d=False)
+        wav = _torch.from_numpy(data)
+        if wav.ndim == 1:
+            wav = wav.unsqueeze(0)
+        elif wav.ndim == 2:
+            wav = wav.T
+        if wav.shape[0] > 1:
+            wav = wav.mean(0, keepdim=True)
+        if sr != sample_rate:
+            wav = torchaudio.functional.resample(wav, sr, sample_rate)
+        sf.write(dst_path, wav.squeeze(0).numpy().astype(np.float32), sample_rate)
+    else:
+        # Non-WAV: use ffmpeg to decode + resample in one pass
+        result = subprocess.run(
+            [
+                "ffmpeg",
+                "-y",
+                "-i",
+                src_path,
+                "-ar",
+                str(sample_rate),
+                "-ac",
+                "1",
+                "-f",
+                "wav",
+                dst_path,
+            ],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"ffmpeg conversion failed: {result.stderr[-300:]}")
 
 
 def text_to_wav(text: str, path: str, sample_rate: int = 24000) -> None:
@@ -1012,19 +1508,21 @@ def text_to_wav(text: str, path: str, sample_rate: int = 24000) -> None:
             os.unlink(tmp)
 
 
-def play_wav_file_interruptible(path: str, stop_event: Optional[threading.Event] = None) -> bool:
+def play_wav_file_interruptible(
+    path: str, stop_event: Optional[threading.Event] = None
+) -> bool:
     """Play a WAV file and optionally stop early when stop_event is set."""
     if sd is None:
         raise RuntimeError("sounddevice is not installed; cannot play audio.")
-    
+
     dev_idx = sd.default.device[1]
     logger.info("Playing audio file: %s on output device index: %s", path, dev_idx)
     data, sample_rate = sf.read(path, always_2d=False)
     logger.debug("Read %d samples at %d Hz", len(data), sample_rate)
-    
+
     sd.play(data, samplerate=sample_rate)
     interrupted = False
-    
+
     # Wait for playback to finish
     while True:
         try:
@@ -1034,14 +1532,14 @@ def play_wav_file_interruptible(path: str, stop_event: Optional[threading.Event]
         except Exception:
             # Fallback if get_stream fails or not supported
             break
-            
+
         if stop_event is not None and stop_event.is_set():
             interrupted = True
             sd.stop()
             logger.info("Playback interrupted.")
             break
         time.sleep(0.02)
-    
+
     logger.info("Playback finished.")
     return interrupted
 
@@ -1097,7 +1595,9 @@ async def run_personaplex_offline(
     """Run PersonaPlex offline inference through moshi.offline CLI."""
     _load_env_if_present()
     if output_text is None:
-        output_text = os.path.join(tempfile.gettempdir(), "personaplex_output_text.json")
+        output_text = os.path.join(
+            tempfile.gettempdir(), "personaplex_output_text.json"
+        )
 
     # Resolve voice prompt path
     final_voice_path_str = _ensure_voice_prompt_exists(voice_prompt)
@@ -1141,13 +1641,13 @@ async def run_personaplex_offline(
                 hf_repo="nvidia/personaplex-7b-v1",
                 device=device,
                 seed=seed,
-                temp_audio=0.0, # Default greedy
+                temp_audio=0.0,  # Default greedy
                 temp_text=0.0,
                 topk_audio=1,
                 topk_text=1,
                 greedy=True,
                 save_voice_prompt_embeddings=False,
-                cpu_offload=cpu_offload
+                cpu_offload=cpu_offload,
             )
             generated_text = _decode_output_tokens(output_text)
             return {
@@ -1157,7 +1657,10 @@ async def run_personaplex_offline(
                 "stdout": "in-process execution",
             }
         except Exception as e:
-            logger.warning("Direct PersonaPlex inference failed: %s. Falling back to subprocess.", e)
+            logger.warning(
+                "Direct PersonaPlex inference failed: %s. Falling back to subprocess.",
+                e,
+            )
 
     logger.info("Running PersonaPlex offline inference via subprocess.")
     result = subprocess.run(
@@ -1197,14 +1700,20 @@ def extract_text_features(text: str) -> Dict[str, Any]:
 
 def extract_audio_features(audio_waveform: np.ndarray) -> Dict[str, Any]:
     """Extracts features from audio."""
-    return {"rms": float(np.sqrt(np.mean(np.square(audio_waveform.astype(np.float32)))))}
+    return {
+        "rms": float(np.sqrt(np.mean(np.square(audio_waveform.astype(np.float32)))))
+    }
 
 
-def capture_microphone_chunk(duration: float = VOICE_CHUNK_SECONDS, sample_rate: int = VOICE_SAMPLE_RATE) -> np.ndarray:
+def capture_microphone_chunk(
+    duration: float = VOICE_CHUNK_SECONDS, sample_rate: int = VOICE_SAMPLE_RATE
+) -> np.ndarray:
     """Captures a chunk of audio from the microphone."""
     if sd is None:
         return np.zeros(int(duration * sample_rate), dtype=np.float32)
-    chunk = sd.rec(int(duration * sample_rate), samplerate=sample_rate, channels=1, dtype='float32')
+    chunk = sd.rec(
+        int(duration * sample_rate), samplerate=sample_rate, channels=1, dtype="float32"
+    )
     sd.wait()
     return chunk.squeeze()
 

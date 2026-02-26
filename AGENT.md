@@ -1,112 +1,80 @@
 # Agent Collaboration Guidelines for Agent-Bot
 
-This document outlines the roles, tools, protocols, and guidelines for AI agents collaborating on the development and maintenance of the Agent-Bot project. The Agent-Bot is an autonomous AI system with terminal-first voice capabilities via NVIDIA PersonaPlex offline mode, multi-phase reasoning, dynamic model switching, and a TUI interface.
+This document is the primary context handoff document for AI agents (Copilot, Gemini, etc.) working on agent-bot. Read this fully before making any changes. It describes the current working state, critical bugs fixed, ongoing research, and known failure modes.
 
-## Roles
+## Project Summary
 
-- **Audio Processing Agent**: Manages the `AudioMultiplexer` and `PersonaPlexManager`. Orchestrates full-duplex streaming, in-process model inference, and reflexive verbal fillers.
-- **Sensory Agent**: Maintains the `RollingAudioBuffer` (auditory memory) and provides tools like `inspect_audio_snippet` for multi-modal context analysis.
-- **Reasoning Agent**: Oversees multi-phase processing (Notes, Planning, Execution, Digesting, Validating, Responding) using Gemma-3n. Ensures conversation history strictly alternates roles.
-- **UI Agent**: Manages the TUI with enhanced navigation: Up/Down for input history, PgUp/PgDn for log scrolling, and Left/Right for cursor editing.
-- **Logging Agent**: Ensures a unified log schema via `InteractionLogManager`, facilitating accurate summaries by the `EventCompressor`.
+Agent-bot is an autonomous AI system with:
+- **Voice backbone**: NVIDIA PersonaPlex (Moshi 7B) running offline, full-duplex, in-process on a local GPU.
+- **Reasoning backbone**: `google/gemma-3n-E2B-it` for multi-phase text/audio/vision reasoning.
+- **TUI**: Curses-based terminal interface with real-time Esc-debug telemetry and a port 9999 JSON socket.
+- **Branch**: `multiple_files` (active development).
 
-## Tools Available
+## Repository Policies (CRITICAL)
 
-- **Model Inference**: Gemma-3n (multi-modal transformer) and legacy llama.cpp backends. `PersonaPlexManager` keeps audio models warm in VRAM for rapid response.
-- **Auditory Backbone**: `AudioMultiplexer` for broadcast mic capture and `RollingAudioBuffer` for 10s sensory memory.
-- **TUI Controls**: Curses-based interface with `/wake`, `/sleep`, and real-time processing phase visibility.
-- **Shutdown Watchdog**: 10-second hard-kill watchdog ensuring reliable process termination.
+- **Reference Source**: The `personaplex/` directory is for **reference only**. **DO NOT EDIT** files in this directory. It is like an `external/` dependency.
+- **Monkeypatching**: All fixes or behavioral changes to the upstream `moshi` or `personaplex` code must be implemented via **monkeypatching in `utils.py`** (see `PersonaPlexManager._apply_patches`).
+- **Commits**: Always use **multiline, detailed commit messages**. Avoid one-liners for architectural changes.
+- **Environment**: Always run with `$env:PYTHONUTF8='1'` on Windows to avoid tokenizer decode crashes.
 
-## Interaction Protocols
+## Current State (as of 2026-02-26)
 
-- **Communication**: Use role prefixes and reference the current processing phase (e.g., "[Reasoning Agent] Phase: Planning").
-- **Handoff Logic**: Priority 1: Trigger reflexive filler. Priority 2: Multi-phase background reasoning. Priority 3: Final spoken response.
-- **Context Management**: Explicitly alternate 'user' and 'assistant' roles in `llm_context` to comply with Gemma-3n constraints. Merge consecutive entries from the same role.
-- **GPU Serialization**: Always acquire `_processing_lock` before making model calls (LLM or PersonaPlex) to prevent CUDA graph conflicts and VRAM spikes.
-- **State Tracking**: Monitor `manual_wake` status and "Next event" time-tracking for autonomous operations.
+All voice pipeline critical bugs have been fixed. The system can hear user speech and generate spoken responses with **zero-latency** (speech starts as soon as the first chunk is generated).
 
-## Guidelines
+### Key Fixed Failure Modes
 
-- **Code Quality**: Follow Python best practices; add docstrings and comments. Use async/await for concurrency.
-- **Security**: Protect HF_TOKEN and avoid logging sensitive data.
-- **Multi-Modal Optimization**: Prefer 4-bit quantization (`BitsAndBytesConfig`) and CPU offloading for large models to manage VRAM effectively.
-- **Thread Safety**: Use `loop.call_soon_threadsafe` when broadcasting from background capture threads to async queues.
-- **Testing**: Validate changes with unit tests (pytest). Use the global mocking strategy in `tests/conftest.py` to avoid heavy model loads. To test real logic that is globally mocked, use `@pytest.mark.skip_heavy_mock`. Always set a timeout (e.g., `--timeout=30`) when running tests.
-- **Collaboration**: Propose changes via pull requests; review for integration impact.
-- **Documentation**: Update this file and README.md as features evolve.
+| Bug | File | Fix | Commit |
+|---|---|---|---|
+| repeated startup greeting | `utils.py` | Explicit `lm_gen.reset_streaming()` during primed state restoration. | `b31b96c` |
+| Incoherent output | `utils.py` | Switched to **greedy text decoding** (`temp_text=0.0`, `top_k_text=1`). | `7443514` |
+| VRAM OOM during Load | `utils.py` | **CPU-first load**: weights are loaded to system RAM before GPU move. | `5f6081c` |
+| multi_linear AttributeError | `quantize.py`| Implemented `.weight` property in quantized layers for fused-op compatibility. | `2b3bd38` |
+| TUI Input Lag | `tui_renderer.py`| Reduced refresh interval from 0.2s to 0.05s (20Hz). | `b31b96c` |
+| `_streaming_session` race | `voice_loop.py` | Capture `session = self._streaming_session` locally before use. | `e73a56d` |
 
-## PersonaPlex Specifics
+### Mimi Routing (Critical — must stay correct)
 
-- **Manager**: Use `PersonaPlexManager` for in-process inference. Avoid subprocess calls unless debugging.
-- **Voices**: Default to `NATF2.pt` for natural conversational tone.
-- **Modes**: Full-duplex streaming is the primary runtime path. Audio is processed in real-time chunks via the `AudioMultiplexer`.
-- **TTS bypass** (`tts_stream`): Teacher-forces text tokens so the depformer samples audio autoregressively — fast, deterministic speech without a conversational exchange.
-- **Conversational path** (`hear_stream`): Generates pyttsx3 TTS audio of the "heard" text, feeds it to `infer()`, and yields the model's natural spoken reply. Use this when you want PersonaPlex's genuine conversational voice.
-- **Voice primer**: `voices/introduce-yourself.wav` — a 24 kHz WAV of "Please introduce yourself." ready to feed to `hear_stream` or `infer`.
+The correct pattern for every inference frame in `step()`, `infer_stream()`, and `infer()`:
+
+```python
+# User audio → model input (both must encode every frame for state sync)
+codes = mimi.encode(chunk)
+_ = other_mimi.encode(chunk)        # discard — state sync only
+
+# Model inference
+tokens = lm_gen.step(codes)
+
+# Decode output (use mimi NOT other_mimi for real audio output)
+pcm = mimi.decode(tokens[:, 1 : self.lm.dep_q + 1])
+_ = other_mimi.decode(tokens[:, 1 : self.lm.dep_q + 1])  # discard — state sync only
+```
+
+## Telemetry & Debugging (Esc Screen)
+
+The **Esc** screen in the TUI provides live telemetry:
+- **VRAM**: Real-time CUDA memory usage. Target is < 16GB.
+- **Inf**: Inference latency in **ms/frame**. Real-time budget is **80ms**.
+- **Loading**: Current model initialization stage.
+- **Tokens**: Rolling window of the last 100 characters generated by the model.
 
 ## Debug Commands (port 9999 + TUI)
 
-Send JSON lines to port 9999: `{"type": "command", "data": "/voice-say Hello world"}`
+Connect to port 9999 and send JSON lines:
+```json
+{"type": "command", "data": "/voice-hear Hello world"}
+```
 
 | Command | Description |
 |---|---|
-| `/voice-say <text>` | Inject text as an `override_response`; spoken via `tts_stream` (bypass path). |
-| `/voice-hear <text>` | Synthesise text as user speech via pyttsx3, feed to PersonaPlex conversationally, play agent reply. |
-| `/voice-diagnose` | Print python path, torch/CUDA info. |
-| `/voice-start` / `/voice-stop` | Start/stop the offline continuous voice loop. |
-| `/set-persona <text>` | Update `PERSONAPLEX_TEXT_PROMPT` at runtime. |
+| `/voice-say <text>` | Zero-latency TTS bypass path. |
+| `/voice-hear <text>` | Full zero-latency conversational turn (hears text, speaks reply). |
+| `/voice-status` | Detailed VRAM and model health summary. |
+| `/logic-reload` | Hot-swap logic code without model reload. |
 
-## Project Skills
+## Open Research (GH Issues)
 
-- **voice-loop-debug** (`.github/skills/voice-loop-debug/SKILL.md`): Triage streaming latency, VAD sensitivity, and in-process inference failures.
-- **model-load-triage** (`.github/skills/model-load-triage/SKILL.md`): Monitor HF blob downloads and VRAM offload behavior for Gemma-3n.
-- **shutdown-recovery** (`.github/skills/shutdown-recovery/SKILL.md`): Handle the 10s watchdog triggers and ensure the capture thread terminates.
-- **env-cuda-alignment** (`.github/skills/env-cuda-alignment/SKILL.md`): Verify bfloat16 compatibility and `moshi` package visibility.
-- **multi-modal-diagnose**: Verify `AutoProcessor` state and audio-tool feedback loops.
-- **vram-multi-modal-optimize**: Strategies for managing memory and graph capture stability.
-- **debug-link**: Instructions for connecting to the Port 9999 hot socket.
-
-### **Phase 6: Audio Multiplexer (Clean Stream Broadcast)**
-*   **Goal:** Decouple the microphone stream from the `VoiceLoop` logic.
-*   **Status:** COMPLETED
-*   **Action:** Implemented `AudioMultiplexer` and `RollingAudioBuffer` for thread-safe, multi-subscriber audio capture.
-
-### **Phase 7: True Full-Duplex (Low-Latency Interjections)**
-*   **Goal:** Enable the agent to start responding or interject *while* the user is still speaking.
-*   **Status:** COMPLETED
-*   **Action:** Shifted to a streaming approach where `LMGen.step` is processed in real-time via `PersonaPlexStreamingSession`.
-
-### **Phase 8: Vision Integration (Multi-Modal Sensory)**
-*   **Goal:** Allow the agent to "see" its environment.
-*   **Status:** COMPLETED
-*   **Action:**
-    1.  Implemented `capture_screen` utility using `mss`.
-    2.  Added `inspect_current_screen` tool in `LlamaModelManager`.
-    3.  Enabled multi-modal visual analysis in `llm_call`.
-    4.  Updated system prompt to include visual sensory instructions.
-
-### **Phase 11: Performance & Flow Overhaul (The Hub Update)**
-*   **Goal:** Eliminate speech latency and enable rapid iteration.
-*   **Status:** COMPLETED
-*   **Action:**
-    1.  Implemented `Warm Generator` architecture (persistent `LMGen`).
-    2.  Shifted to `Streaming Playback` (chunks spoke as generated).
-    3.  Created `Real-time Experimentation Hub` (Port 9999 socket).
-    4.  Implemented `Deep Hot-Reload` (`/logic-reload` swaps code without weight reloads).
-    5.  Resolved Moshi `IndexError` and `AssertionError` via monkeypatches.
-
-### **Phase 12: Memory & Resource Orchestration**
-*   **Goal:** Manage the 23GB+ VRAM footprint of having both models loaded.
-*   **Action:**
-    1.  Implement a "sleep mode" for Gemma where its weights are offloaded to CPU/Disk when inactive.
-    2.  Add a background task that monitors `torch.cuda.memory_reserved()` and triggers `empty_cache()`.
-
-### **Phase 10: Audio Output Transformation (DSP Path)**
-*   **Goal:** Allow the agent to transform its own spoken voice via tools.
-*   **Action:**
-    1.  Implement a transformable audio output pipeline between PersonaPlex and the sound drivers.
-    2.  Add a `set_voice_filter(filter_type, params)` tool.
-    3.  Support real-time DSP effects like pitch-shifting (e.g., lower/higher tone) or robotic modulation.
-    4.  Ensure the implementation is cross-platform (avoiding Windows-only APIs where possible).
+- **#8**: Post-load PyTorch quantization increases VRAM pressure during inference due to on-the-fly dequantization. Reverted aggressive skip patterns.
+- **#9**: Switched to pre-quantized `model_bnb_4bit.pt` from community repository `brianmatzelle/personaplex-7b-v1-bnb-4bit`.
+- **#5**: Inference latency (~500ms/frame) causes linguistic drift. Real-time speed is required for peak coherence.
 
 Agents should operate autonomously while coordinating for seamless development.

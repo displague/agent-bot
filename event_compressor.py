@@ -39,10 +39,12 @@ class EventCompressor:
         if self.llama_manager is None:
             self.logger.debug("Event compression skipped (deep reasoning disabled).")
             return
-            
+
         self.logger.debug("Starting event compression")
         if self.state.get("is_processing", False):
-            self.logger.debug("Skipping compression while user interaction is processing.")
+            self.logger.debug(
+                "Skipping compression while user interaction is processing."
+            )
             return
         if not os.path.exists(INTERACTION_LOG_PATH):
             self.logger.debug("No logs to compress.")

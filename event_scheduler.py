@@ -8,7 +8,9 @@ logger = logging.getLogger("autonomous_system.event_scheduler")
 
 
 class EventScheduler:
-    def __init__(self, state, interaction_log_manager, index_manager, runtime_manager=None):
+    def __init__(
+        self, state, interaction_log_manager, index_manager, runtime_manager=None
+    ):
         self.event_queue = asyncio.Queue()
         self._scheduled_events = []
         self.state = state
@@ -38,7 +40,9 @@ class EventScheduler:
 
             now = datetime.now()
             # Process ready events
-            ready = [e for e in self._scheduled_events if e.get("trigger_time", now) <= now]
+            ready = [
+                e for e in self._scheduled_events if e.get("trigger_time", now) <= now
+            ]
             for e in ready:
                 self._scheduled_events.remove(e)
                 task = asyncio.create_task(self.handle_event(e))
@@ -49,10 +53,14 @@ class EventScheduler:
 
             # Update status bar with the next event
             if self._scheduled_events:
-                next_e = min(self._scheduled_events, key=lambda x: x.get("trigger_time", now))
+                next_e = min(
+                    self._scheduled_events, key=lambda x: x.get("trigger_time", now)
+                )
                 t = next_e.get("trigger_time")
                 if t:
-                    self.state["next_event"] = f"{next_e['type']} @ {t.strftime('%H:%M:%S')}"
+                    self.state["next_event"] = (
+                        f"{next_e['type']} @ {t.strftime('%H:%M:%S')}"
+                    )
                 else:
                     self.state["next_event"] = f"{next_e['type']} (now)"
             else:

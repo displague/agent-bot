@@ -4,24 +4,23 @@ An autonomous AI agent system that interacts via text or voice, processes intera
 
 ## Features
 
-- **True Full-Duplex Audio**: Real-time speech-to-speech interaction with zero-latency streaming. The agent can interject or respond instantly (<1s) while concurrently processing environmental audio.
-- **Warm Generator Architecture**: Maintains a warm `LMGen` instance in VRAM to eliminate the multi-minute model re-instantiation penalty between turns.
+- **True Zero-Latency Voice**: The agent starts speaking fillers and conversational responses as soon as the first chunk is generated (<1s), bypassing intermediate WAV files.
+- **Enhanced Real-Time Telemetry**: Live VRAM usage, inference latency (ms/frame), recent text tokens, and loading stages visible directly on the TUI debug screen.
+- **Robust Model Loading**: CPU-first weight loading for quantized models to prevent VRAM OOM on 16GB GPUs. Supports pre-quantized `bitsandbytes` weights from community repositories.
 - **Auditory & Visual Memory**: 10-second rolling audio buffer and native screen capture for rich contextual reasoning.
-- **Multi-Modal Reasoning**: Powered by `google/gemma-3n-E2B-it`, supporting native text, audio, and vision analysis with 4-bit quantization.
-- **Real-Time Telemetry**: Detailed VRAM and duration tracking for all loading stages and inference turns.
-- **Experimentation Hub (Hot Socket)**: Port 9999 JSON socket for live command injection, state monitoring, and remote interaction.
-- **Deep Logic Hot-Reload**: `/logic-reload` command allows for runtime swapping of `functional_agent.py`, `interaction_processor.py`, and `utils.py` without losing model weights.
+- **Multi-Modal Reasoning**: Powered by `google/gemma-3n-E2B-it`, supporting native text, audio, and vision analysis.
+- **Experimentation Hub (Hot Socket)**: Port 9999 JSON socket for live command injection and remote state monitoring.
+- **Deep Logic Hot-Reload**: `/logic-reload` command allows for runtime swapping of code without losing model weights.
 - **Advanced Audio Diagnostics**: Live device switching, hardware verification tones, and explicit device routing logs.
 - **Robust Shutdown**: Graceful shutdown sequence with a 10-second hard-kill watchdog.
 
 ## Architecture
 
-- `main.py`: Entry point; manages the high-level lifecycle and the JSON `DebugServer`.
-- `utils.py`: Core infrastructure including `AudioMultiplexer`, `PersonaPlexManager` (warm weights), and the Moshi streaming state bug-fixes.
-- `voice_loop.py`: Orchestrates the listener, processor, and the new asynchronous `_playback_loop` for chunked audio streaming.
-- `interaction_processor.py`: Manages the cognitive handoff and supports `SKIP_DEEP_REASONING` for lightweight PersonaPlex testing.
-- `tui_renderer.py` / `simple_renderer.py`: Renderers that now manage the full `InteractionProcessor` lifecycle to support logic hot-swapping.
-- `config.py`: Central configuration for audio thresholds, optimization strategies, and persona prompts.
+- `main.py`: Entry point; refactored to start TUI early for visibility during model loading. Manages the JSON `DebugServer` on port 9999.
+- `utils.py`: Core infrastructure — `PersonaPlexManager` (pre-quantized weight loading, CPU-first safety, monkeypatching), `PersonaPlexStreamingSession` (latency tracking), `AudioMultiplexer`.
+- `voice_loop.py`: Orchestrates VAD listener and `say_stream()` chunked playback with precise gapless timing.
+- `interaction_processor.py`: Manages the cognitive handoff using new zero-latency streaming paths.
+- `quantize.py`: Integrates `bitsandbytes` NF4 quantization with bit-depth aware size estimation.
 
 ## Setup
 
@@ -30,7 +29,8 @@ An autonomous AI agent system that interacts via text or voice, processes intera
 - Python 3.10+
 - NVIDIA GPU (RTX 5080 recommended, 16GB+ VRAM)
 - CUDA 12.1+ (Tested with CUDA 13.0)
-- `triton-windows` (included in lockfile for Windows stability)
+- `uv` for environment management
+- `bitsandbytes` for real 4-bit quantization
 
 ### Installation
 
@@ -40,9 +40,11 @@ An autonomous AI agent system that interacts via text or voice, processes intera
    cd agent-bot
    ```
 
-2. Create and use the project virtualenv:
+2. Create and activate the project virtualenv:
    ```bash
    uv venv .venv
+   # Windows PowerShell:
+   .venv\Scripts\Activate.ps1
    ```
 
 3. Install Python dependencies from lockfile:
@@ -50,47 +52,56 @@ An autonomous AI agent system that interacts via text or voice, processes intera
    uv pip install -r requirements.txt
    ```
 
-4. Install PersonaPlex:
-   ```bash
-   git clone https://github.com/NVIDIA/personaplex.git
-   # The requirements.txt already includes the upstream dependency.
-   ```
-
 ### Running
 
-```bash
-python main.py
+```powershell
+# Standard run (recommended for voice testing):
+$env:PYTHONUTF8='1'; uv run main.py --reset-logs --skip-deep-reasoning --no-sleep
+
+# With 4-bit quantization (Definitively fits in 16GB VRAM via bitsandbytes):
+$env:PYTHONUTF8='1'; uv run main.py --reset-logs --skip-deep-reasoning --no-sleep --quantize 4bit
 ```
 
-Optional flags:
-- `--reset-logs`: Clear interaction and debug logs on startup. (Preserves model weights/shards).
+CLI flags:
+- `--reset-logs`: Clear interaction and debug logs on startup.
 - `--dev`: Disable autonomous thoughts and hourly compression.
-- `--skip-deep-reasoning`: Bypass Gemma-3n load to focus entirely on PersonaPlex.
+- `--skip-deep-reasoning`: Bypass Gemma-3n load; focus entirely on PersonaPlex voice.
+- `--no-sleep`: Disable auto-sleep mode (keeps voice loop active for debugging).
+- `--quantize {8bit,4bit}`: Apply real weights quantization (bitsandbytes).
 
 Quick first-run validation:
 1. Start with simple UI and reset logs:
-   ```bash
-   # PowerShell
-   $env:AGENTBOT_UI_MODE='simple'; python main.py --reset-logs --dev --skip-deep-reasoning
+   ```powershell
+   $env:AGENTBOT_UI_MODE='simple'; $env:PYTHONUTF8='1'; uv run main.py --reset-logs --dev --skip-deep-reasoning --no-sleep
    ```
 2. At the prompt, run:
    - `/help`
    - `/voice-test-tone` (Verify audio output)
    - `/voice-status` (Check model health)
+   - `/voice-diagnose` (Print torch/CUDA/moshi versions)
+   - `/voice-start` (Start continuous voice loop)
+   - `/voice-say Hello` (Inject TTS bypass)
+   - `/voice-hear Hello` (Full conversational turn)
    - `/logic-reload` (Test hot-swapping)
    - `/quit` to exit cleanly
 
-## Configuration
+## Known Issues & Ongoing Research
 
-- `config.py`: Adjust paths, thresholds, and persona prompts.
-- `AGENTBOT_UI_MODE`: `auto` (default), `simple`, or `curses`.
-- `AGENTBOT_DEV_MODE`: `1` disables autonomous background tasks.
-- `AGENTBOT_LOG_LEVEL`: default `INFO`; set to `DEBUG` for verbose diagnostics.
+| Issue | Status | Notes |
+|---|---|---|
+| Linguistic Drift during slowness | Research | GH #5: Inference speed ~500ms/frame (Budget: 80ms) causes codec drift. |
+| Weights Load OOM | Fixed `5f6081c` | Resolved via CPU-first loading and GPU isolation during weight transfer. |
+| Incoherent response | Mitigated | Improved via greedy text decoding (`temp_text=0.0`). |
+| TUI Input Lag | Fixed `b31b96c` | Reduced refresh interval from 0.2s to 0.05s (20Hz). |
+| repeated startup greeting | Fixed `b31b96c` | Explicit `lm_gen.reset_streaming()` during primed state restoration. |
+| AttributeError in multi_linear | Fixed `2b3bd38` | Implemented `.weight` property in quantized layers for fused-op compatibility. |
 
 ## Development
 
-- See [AGENT.md](AGENT.md) for collaboration guidelines.
-- Skills in [.github/skills/](.github/skills/) for modular extensions.
+- See [AGENT.md](AGENT.md) for collaboration guidelines and current architecture decisions.
+- Skills in [.github/skills/](.github/skills/) for modular diagnostic playbooks.
+- GH Issues track open research: #8 (quantization), #9 (pre-quantized HF files), #5/#7 (voice response quality).
+- Branch: `multiple_files` (active development)
 
 ## License
 

@@ -13,7 +13,7 @@ import soundfile as sf
 
 from functional_agent import FunctionalAgent
 from config import (
-    INTERACTION_LOG_PATH, 
+    INTERACTION_LOG_PATH,
     INTERACTION_PROCESS_TIMEOUT_SECONDS,
     PERSONAPLEX_VERBAL_FILLERS,
     PERSONAPLEX_VOICE_PROMPT,
@@ -57,21 +57,18 @@ class InteractionProcessor:
         """Immediately triggers a reflexive verbal filler through PersonaPlex."""
         if not self.voice_loop or not PERSONAPLEX_VERBAL_FILLERS:
             return
-        
+
         filler = random.choice(PERSONAPLEX_VERBAL_FILLERS)
         self.logger.info(f"Triggering verbal filler: {filler}")
-        
+
         try:
             if self.personaplex_manager:
-                # Run the synchronous generator in a thread, collect all chunks,
-                # then play as one continuous audio (avoids frame-by-frame gaps).
+                # Direct stream to playback queue (zero latency)
                 stream = self.personaplex_manager.tts_stream(
                     text=filler,
                     voice_prompt_path=PERSONAPLEX_VOICE_PROMPT,
                 )
-                chunks = await asyncio.to_thread(list, stream)
-                audio = np.concatenate([c for c in chunks if c.size > 0]).astype(np.float32)
-                await self.voice_loop.say_audio(audio)
+                await self.voice_loop.say_stream(stream)
             else:
                 # Fallback to offline/sub-process if manager not loaded
                 with tempfile.TemporaryDirectory(prefix="filler_") as tmpdir:
@@ -92,7 +89,7 @@ class InteractionProcessor:
                         await asyncio.to_thread(
                             utils.play_wav_file_interruptible,
                             output_wav,
-                            getattr(self.voice_loop, "_playback_interrupt", None)
+                            getattr(self.voice_loop, "_playback_interrupt", None),
                         )
         except Exception as e:
             self.logger.error(f"Failed to trigger verbal filler: {e}")
@@ -107,7 +104,7 @@ class InteractionProcessor:
                         interaction = self.interaction_queue.get_nowait()
                         user_input = interaction.get("input", "")
                         audio_waveform = interaction.get("audio_waveform", None)
-                        
+
                         # If audio is present but input is empty, transcribe first
                         if audio_waveform is not None and not user_input:
                             self.state["processing_phase"] = "Transcribing"
@@ -115,21 +112,31 @@ class InteractionProcessor:
                             user_input = await utils.transcribe_audio(audio_waveform)
                             self.logger.info(f"Transcribed: {user_input}")
                             if not user_input:
-                                self.logger.info("Empty transcription, skipping interaction.")
-                                self.state["unprocessed_interactions"] = max(0, self.state["unprocessed_interactions"] - 1)
+                                self.logger.info(
+                                    "Empty transcription, skipping interaction."
+                                )
+                                self.state["unprocessed_interactions"] = max(
+                                    0, self.state["unprocessed_interactions"] - 1
+                                )
                                 continue
-                            await self.interaction_log_manager.append(f"Voice Input: {user_input}")
+                            await self.interaction_log_manager.append(
+                                f"Voice Input: {user_input}"
+                            )
 
                         self.state["is_processing"] = True
                         self.state["last_processing_input"] = (user_input or "")[:240]
-                        self.state["last_processing_started_at"] = datetime.now().isoformat()
+                        self.state["last_processing_started_at"] = (
+                            datetime.now().isoformat()
+                        )
                         self.state["last_processing_status"] = "running"
                         self.state["last_processing_error"] = ""
 
                         self.logger.info(f"Processing interaction: {user_input}")
 
                         if audio_waveform is not None:
-                            audio_features = utils.extract_audio_features(audio_waveform)
+                            audio_features = utils.extract_audio_features(
+                                audio_waveform
+                            )
 
                         override_response = interaction.get("override_response")
                         if override_response:
@@ -137,7 +144,9 @@ class InteractionProcessor:
                             self.logger.info(f"Using override response: {response}")
                         else:
                             # Trigger reflexive verbal filler concurrently with deep reasoning
-                            filler_task = asyncio.create_task(self._trigger_verbal_filler())
+                            filler_task = asyncio.create_task(
+                                self._trigger_verbal_filler()
+                            )
 
                             if SKIP_DEEP_REASONING:
                                 self.logger.info("Skipping deep reasoning per config.")
@@ -150,23 +159,22 @@ class InteractionProcessor:
                                 )
 
                             await filler_task
-                        
+
                         self.logger.info(f"Response: {response}")
 
                         # Speak final deep response aloud
                         try:
                             if self.personaplex_manager:
-                                # Run the synchronous generator in a thread, collect all chunks,
-                                # then play as one continuous audio (avoids frame-by-frame gaps).
+                                # Direct stream to playback queue (zero latency)
                                 stream = self.personaplex_manager.tts_stream(
                                     text=response,
                                     voice_prompt_path=PERSONAPLEX_VOICE_PROMPT,
                                 )
-                                chunks = await asyncio.to_thread(list, stream)
-                                audio = np.concatenate([c for c in chunks if c.size > 0]).astype(np.float32)
-                                await self.voice_loop.say_audio(audio)
+                                await self.voice_loop.say_stream(stream)
                             else:
-                                with tempfile.TemporaryDirectory(prefix="final_") as tmpdir:
+                                with tempfile.TemporaryDirectory(
+                                    prefix="final_"
+                                ) as tmpdir:
                                     input_wav = os.path.join(tmpdir, "silence.wav")
                                     duration = 3.0
                                     samples = int(duration * VOICE_SAMPLE_RATE)
@@ -184,14 +192,22 @@ class InteractionProcessor:
                                         await asyncio.to_thread(
                                             utils.play_wav_file_interruptible,
                                             output_wav,
-                                            getattr(self.voice_loop, "_playback_interrupt", None)
+                                            getattr(
+                                                self.voice_loop,
+                                                "_playback_interrupt",
+                                                None,
+                                            ),
                                         )
                         except Exception as e:
                             self.logger.error(f"Failed to speak final response: {e}")
 
-                        await self.interaction_log_manager.append(f"Thought: {response}")
+                        await self.interaction_log_manager.append(
+                            f"Thought: {response}"
+                        )
                         if self.index_manager:
-                            self.index_manager.index_interaction({"input": user_input, "output": response})
+                            self.index_manager.index_interaction(
+                                {"input": user_input, "output": response}
+                            )
                         self.state["last_processing_status"] = "ok"
                         self.state["last_processing_error"] = ""
                         self.state["unprocessed_interactions"] = max(
@@ -201,9 +217,7 @@ class InteractionProcessor:
                     except asyncio.QueueEmpty:
                         pass
                     except asyncio.TimeoutError:
-                        msg = (
-                            f"interaction timeout after {INTERACTION_PROCESS_TIMEOUT_SECONDS}s"
-                        )
+                        msg = f"interaction timeout after {INTERACTION_PROCESS_TIMEOUT_SECONDS}s"
                         self.logger.error(msg)
                         await self.interaction_log_manager.append(f"System: {msg}")
                         self.state["last_processing_status"] = "timeout"

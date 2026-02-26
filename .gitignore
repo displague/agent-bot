@@ -11,3 +11,11 @@ hf_offload/
 offload_weights/
 voices/
 model.bin
+external/
+
+# Audio files — voice prompts and recordings are local/personal, not committed
+*.m4a
+*.wav
+*.mp3
+*.flac
+*.ogg

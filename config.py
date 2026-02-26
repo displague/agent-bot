@@ -9,6 +9,7 @@ COMPRESSED_LOG_PATH = "compressed_logs/compressed_log.jsonl"
 INDEX_PATH = "index/context_index.json"
 DAILY_SLEEP_START = 23
 DAILY_SLEEP_END = 7
+NO_SLEEP = False  # Override with --no-sleep to stay ACTIVE at all hours
 MAX_WORKERS = 5
 MODEL_PATH = "model.bin"  # Legacy fallback path for local GGUF.
 
@@ -47,7 +48,10 @@ PERSONAPLEX_VOICE_PROMPT_DIR = "personaplex"
 PERSONAPLEX_DEVICE = "cuda"
 PERSONAPLEX_CPU_OFFLOAD = False
 PERSONAPLEX_USE_CUDA_GRAPHS = False
-PERSONAPLEX_OPTIMIZE = "eager" # auto, eager, compile, graphs
+PERSONAPLEX_OPTIMIZE = "eager"  # auto, eager, compile, graphs
+PERSONAPLEX_QUANTIZE = (
+    ""  # "", "none", "8bit", or "4bit" — quantize LM weights after load
+)
 PERSONAPLEX_OFFLINE_TIMEOUT_SECONDS = 900
 PERSONAPLEX_PYTHON_BIN = ""
 PERSONAPLEX_VERBAL_FILLERS = [

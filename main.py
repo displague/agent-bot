@@ -167,12 +167,17 @@ async def main(stdscr=None, renderer_name="auto", renderer_reason="", dev_mode=F
         "next_event": "Not scheduled",
         "is_sleeping": False,
         "is_processing": False,
+        "vram_gb": 0.0,
+        "inference_ms": 0.0,
+        "recent_tokens": "",
+        "loading_stage": "Starting",
     }
     interaction_queue = asyncio.Queue()
 
     startup_lines = [
         "Agent-Bot: interactive autonomous assistant with voice and scheduled tasks.",
-        f"Renderer: {renderer_name}" + (f" ({renderer_reason})" if renderer_reason else ""),
+        f"Renderer: {renderer_name}"
+        + (f" ({renderer_reason})" if renderer_reason else ""),
         "Initializing systems...",
     ]
     if dev_mode:
@@ -183,7 +188,8 @@ async def main(stdscr=None, renderer_name="auto", renderer_reason="", dev_mode=F
     _show_startup_status(stdscr, startup_lines)
 
     def _status_callback(message: str):
-        # If this message is a completion (contains 'loaded' or 'Model ready'), 
+        state["loading_stage"] = message
+        # If this message is a completion (contains 'loaded' or 'Model ready'),
         # try to replace the matching 'Loading' line if it's the last one.
         if ("loaded" in message or "ready" in message) and startup_lines:
             last = startup_lines[-1]
@@ -199,59 +205,49 @@ async def main(stdscr=None, renderer_name="auto", renderer_reason="", dev_mode=F
 
     index_manager = IndexManager()
     interaction_log_manager = InteractionLogManager()
-    
+
     audio_multiplexer = AudioMultiplexer()
     audio_multiplexer.start()
-    
+
     rolling_buffer = RollingAudioBuffer(audio_multiplexer)
     await rolling_buffer.start()
 
-    personaplex_manager = PersonaPlexManager(status_callback=_status_callback)
-    
+    personaplex_manager = PersonaPlexManager(
+        status_callback=_status_callback, state=state
+    )
+
+    async def vram_monitor():
+        """Periodically update the shared state with current VRAM usage."""
+        import torch
+
+        while True:
+            try:
+                if torch.cuda.is_available():
+                    state["vram_gb"] = torch.cuda.memory_allocated() / (1024**3)
+            except Exception:
+                pass
+            await asyncio.sleep(5.0)
+
     # Initialize InteractionProcessor before renderers to allow hot-reloading reference
     interaction_processor = InteractionProcessor(
         interaction_queue,
         state,
-        None, # llama_manager set below
+        None,  # llama_manager set below
         interaction_log_manager,
         index_manager,
-        voice_loop=None, # voice_loop set below
+        voice_loop=None,  # voice_loop set below
         personaplex_manager=personaplex_manager,
     )
 
-    voice_loop = VoiceLoop(state, interaction_log_manager, personaplex_manager=personaplex_manager, audio_multiplexer=audio_multiplexer)
+    voice_loop = VoiceLoop(
+        state,
+        interaction_log_manager,
+        personaplex_manager=personaplex_manager,
+        audio_multiplexer=audio_multiplexer,
+    )
     interaction_processor.voice_loop = voice_loop
 
-    llama_manager = None
-    if not skip_reasoning:
-        llama_manager = LlamaModelManager(
-            model_path=MODEL_PATH,
-            llm_executor=runtime_manager.llm_executor,
-            status_callback=_status_callback,
-            voice_loop=rolling_buffer,
-        )
-    else:
-        _show_startup_status(stdscr, startup_lines + ["Stage: Skipping LLM load (deep reasoning disabled)"])
-
-    interaction_processor.llama_manager = llama_manager
-    # Re-init functional agent if llama_manager changed
-    from functional_agent import FunctionalAgent
-    interaction_processor.functional_agent = FunctionalAgent(llama_manager, state=state)
-
-    # Explicitly load PersonaPlex models during startup to show progress
-    await asyncio.to_thread(personaplex_manager.load)
-
-    # Initial greeting — override_response skips verbal filler and deep reasoning,
-    # so TTS starts immediately after models are loaded.
-    interaction_queue.put_nowait({
-        "input": "[Startup]",
-        "audio_waveform": None,
-        "override_response": "Hello! I'm online and ready.",
-    })
-
-    event_scheduler = EventScheduler(
-        state, interaction_log_manager, index_manager, runtime_manager=runtime_manager
-    )
+    # Initialize and start renderer early so loading progress is visible
     if stdscr is not None:
         from tui_renderer import TUIRenderer  # noqa: PLC0415
 
@@ -271,9 +267,53 @@ async def main(stdscr=None, renderer_name="auto", renderer_reason="", dev_mode=F
             interaction_processor=interaction_processor,
             voice_loop=voice_loop,
         )
+
+    ui_task = runtime_manager.register_task(asyncio.create_task(ui_renderer.start()))
+
+    llama_manager = None
+    if not skip_reasoning:
+        llama_manager = LlamaModelManager(
+            model_path=MODEL_PATH,
+            llm_executor=runtime_manager.llm_executor,
+            status_callback=_status_callback,
+            voice_loop=rolling_buffer,
+        )
+    else:
+        _show_startup_status(
+            stdscr,
+            startup_lines + ["Stage: Skipping LLM load (deep reasoning disabled)"],
+        )
+
+    interaction_processor.llama_manager = llama_manager
+    # Re-init functional agent if llama_manager changed
+    from functional_agent import FunctionalAgent
+
+    interaction_processor.functional_agent = FunctionalAgent(llama_manager, state=state)
+
+    # Explicitly load PersonaPlex models during startup to show progress
+    await asyncio.to_thread(personaplex_manager.load)
+
+    # Initial greeting — override_response skips verbal filler and deep reasoning,
+    # so TTS starts immediately after models are loaded.
+    interaction_queue.put_nowait(
+        {
+            "input": "[Startup]",
+            "audio_waveform": None,
+            "override_response": "Hello! I'm online and ready.",
+        }
+    )
+    await asyncio.sleep(5.0)
+
+    event_scheduler = EventScheduler(
+        state, interaction_log_manager, index_manager, runtime_manager=runtime_manager
+    )
+
     thought_generator = ThoughtGenerator(
-        state, llama_manager, interaction_log_manager, event_scheduler,
-        interaction_processor=interaction_processor
+        state,
+        llama_manager,
+        interaction_log_manager,
+        event_scheduler,
+        interaction_processor=interaction_processor,
     )
     event_compressor = EventCompressor(
         llama_manager,
@@ -284,16 +324,20 @@ async def main(stdscr=None, renderer_name="auto", renderer_reason="", dev_mode=F
 
     # Debug Server (Hot Socket)
     debug_server = DebugServer(command_handler=ui_renderer.handle_command, state=state)
-    
-    ui_task = runtime_manager.register_task(asyncio.create_task(ui_renderer.start()))
+
     background_tasks = [
         runtime_manager.register_task(asyncio.create_task(event_scheduler.start())),
-        runtime_manager.register_task(asyncio.create_task(interaction_processor.start())),
+        runtime_manager.register_task(
+            asyncio.create_task(interaction_processor.start())
+        ),
         runtime_manager.register_task(asyncio.create_task(debug_server.start())),
+        runtime_manager.register_task(asyncio.create_task(vram_monitor())),
     ]
     if not dev_mode:
         background_tasks.append(
-            runtime_manager.register_task(asyncio.create_task(thought_generator.start()))
+            runtime_manager.register_task(
+                asyncio.create_task(thought_generator.start())
+            )
         )
         background_tasks.append(
             runtime_manager.register_task(asyncio.create_task(event_compressor.start()))
@@ -318,28 +362,32 @@ async def main(stdscr=None, renderer_name="auto", renderer_reason="", dev_mode=F
             )
     finally:
         logger.info("Starting shutdown sequence")
-        
+
         # Start hard-kill watchdog: if we don't finish in 10s, force exit.
         def _watchdog():
             time.sleep(10)
-            print("\nShutdown watchdog triggered: force killing process tree...", flush=True)
+            print(
+                "\nShutdown watchdog triggered: force killing process tree...",
+                flush=True,
+            )
             force_exit_now(130)
-        
+
         import threading
         import time
+
         watchdog_thread = threading.Thread(target=_watchdog, daemon=True)
         watchdog_thread.start()
 
         ui_task.cancel()
         interaction_processor.request_stop()
         thought_generator.request_stop()
-        
+
         # Stop auditory backbone
-        if 'rolling_buffer' in locals():
+        if "rolling_buffer" in locals():
             await rolling_buffer.stop()
-        if 'audio_multiplexer' in locals():
+        if "audio_multiplexer" in locals():
             audio_multiplexer.stop()
-        
+
         # Shut down scheduler with a timeout
         try:
             await asyncio.wait_for(event_scheduler.shutdown(), timeout=2.0)
@@ -349,7 +397,7 @@ async def main(stdscr=None, renderer_name="auto", renderer_reason="", dev_mode=F
         # Cancel all background tasks
         for task in background_tasks:
             task.cancel()
-        
+
         if background_tasks:
             done, pending = await asyncio.wait(
                 background_tasks, timeout=SHUTDOWN_GRACE_SECONDS
@@ -372,9 +420,28 @@ if __name__ == "__main__":
     _load_environment()
 
     parser = argparse.ArgumentParser(description="Agent-Bot")
-    parser.add_argument("--reset-logs", action="store_true", help="Clear all logs on startup")
-    parser.add_argument("--dev", action="store_true", help="Enable dev mode (disables autonomous tasks)")
-    parser.add_argument("--skip-deep-reasoning", action="store_true", help="Bypass the deep reasoning LLM phase")
+    parser.add_argument(
+        "--reset-logs", action="store_true", help="Clear all logs on startup"
+    )
+    parser.add_argument(
+        "--dev", action="store_true", help="Enable dev mode (disables autonomous tasks)"
+    )
+    parser.add_argument(
+        "--skip-deep-reasoning",
+        action="store_true",
+        help="Bypass the deep reasoning LLM phase",
+    )
+    parser.add_argument(
+        "--no-sleep",
+        action="store_true",
+        help="Disable sleep schedule; agent stays ACTIVE at all hours",
+    )
+    parser.add_argument(
+        "--quantize",
+        choices=["8bit", "4bit"],
+        default=None,
+        help="Quantize PersonaPlex LM weights (8bit ~8-10 GB, 4bit ~5-7 GB)",
+    )
     args_parsed = parser.parse_args()
 
     if args_parsed.reset_logs:
@@ -384,14 +451,21 @@ if __name__ == "__main__":
     backup, f = redirect_stderr()  # Store the file object
     try:
         ui_mode = _resolve_ui_mode()
-        dev_mode = args_parsed.dev or _env_enabled("AGENTBOT_DEV_MODE", default=DEV_DISABLE_AUTONOMOUS)
-        
+        dev_mode = args_parsed.dev or _env_enabled(
+            "AGENTBOT_DEV_MODE", default=DEV_DISABLE_AUTONOMOUS
+        )
+
         # Merge CLI and config for deep reasoning toggle
         import config
+
         if args_parsed.skip_deep_reasoning:
             config.SKIP_DEEP_REASONING = True
         skip_reasoning = getattr(config, "SKIP_DEEP_REASONING", False)
-        
+        if args_parsed.no_sleep:
+            config.NO_SLEEP = True
+        if args_parsed.quantize:
+            config.PERSONAPLEX_QUANTIZE = args_parsed.quantize
+
         curses_ok, curses_mod, reason = _check_curses_available()
 
         if ui_mode == "simple":

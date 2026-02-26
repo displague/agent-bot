@@ -21,14 +21,14 @@ class InteractionLogManager:
         async with self.lock:
             self.interaction_log.append(entry)
             self.logger.debug(f"Appended entry: {entry}")
-            
+
             # Persist to hard log file
             try:
                 os.makedirs(os.path.dirname(INTERACTION_LOG_PATH), exist_ok=True)
                 with open(INTERACTION_LOG_PATH, "a", encoding="utf-8") as f:
                     log_entry = {
                         "timestamp": datetime.now().isoformat(),
-                        "event": entry
+                        "event": entry,
                     }
                     f.write(json.dumps(log_entry) + "\n")
             except Exception as e:
