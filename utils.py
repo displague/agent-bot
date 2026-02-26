@@ -14,7 +14,6 @@ from typing import Any, Dict, Optional, Callable, Set, Tuple
 
 import numpy as np
 import soundfile as sf
-import torch
 from mss import mss
 from PIL import Image
 
@@ -59,6 +58,7 @@ _voice_prompt_cache: dict = {}
 def _streaming_state_to_cpu(state):
     """Recursively clone a streaming state dict/dataclass, moving tensors to CPU RAM."""
     import copy
+    import torch
     from dataclasses import fields, is_dataclass
     if isinstance(state, torch.Tensor):
         return state.detach().cpu().clone()
@@ -77,6 +77,7 @@ def _streaming_state_to_cpu(state):
 def _streaming_state_to_device(state, device):
     """Recursively clone a CPU streaming state, moving tensors to *device*."""
     import copy
+    import torch
     from dataclasses import fields, is_dataclass
     if isinstance(state, torch.Tensor):
         return state.to(device, non_blocking=True).clone()
@@ -179,6 +180,7 @@ class PersonaPlexStreamingSession:
         Uses _restore_primed_state() instead of re-running step_system_prompts
         (~46s) so session starts are instant after load() warmup.
         """
+        import torch
         self.manager._apply_optimizations()
         self.manager.load()
 
@@ -208,6 +210,7 @@ class PersonaPlexStreamingSession:
 
     def step(self, audio_chunk: np.ndarray) -> Tuple[Optional[np.ndarray], Optional[str]]:
         """Process a single audio chunk and return generated audio and text (if any)."""
+        import torch
         if not self._is_ready:
             self.start()
             
@@ -424,6 +427,7 @@ class PersonaPlexManager:
     def load(self):
         """Load models into VRAM if not already loaded."""
         global MimiModel, LMGen, loaders, sentencepiece, moshi_run_inference
+        import torch
         
         if self.mimi is not None:
             return
@@ -609,6 +613,7 @@ class PersonaPlexManager:
 
     def infer_stream(self, text_prompt: str, voice_prompt_path: str, input_wav_path: str):
         """Generator that yields audio chunks as they are produced."""
+        import torch
         import moshi.models.lm
         self._apply_optimizations()
         self.load()
@@ -671,6 +676,7 @@ class PersonaPlexManager:
         This is the same mechanism used internally by step_system_prompts/_step_text_prompt
         but with the audio output captured for playback.
         """
+        import torch
         self._apply_optimizations()
         self.load()
 
@@ -729,6 +735,7 @@ class PersonaPlexManager:
 
     def infer(self, text_prompt: str, voice_prompt_path: str, input_wav_path: str, output_wav_path: str, output_text_path: Optional[str] = None):
         """Synchronous inference implementation using the warm models."""
+        import torch
         logger.info("PersonaPlexManager: starting inference for prompt: %s", text_prompt[:100])
         import moshi.models.lm
         
@@ -828,6 +835,7 @@ class PersonaPlexManager:
         speaking and generates its natural response in the PersonaPlex voice.
         Yields chunks as they are generated (zero-latency).
         """
+        import torch
         import tempfile as _tempfile
         from moshi.offline import wrap_with_system_tags
 
@@ -1057,6 +1065,7 @@ def set_audio_devices(input_id: Optional[int] = None, output_id: Optional[int] =
 
 def play_test_tone(duration: float = 1.0, freq: float = 440.0):
     """Play a test tone to verify audio output hardware."""
+    import torch
     if sd is None:
         raise RuntimeError("sounddevice is not installed; cannot play tone.")
     
