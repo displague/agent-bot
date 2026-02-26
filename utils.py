@@ -603,31 +603,31 @@ class PersonaPlexManager:
             self.lm_gen.streaming_forever(1)
             
             self._status("PersonaPlexManager: models and warm generator loaded and ready.")
-                
-                # Pre-warm voice prompt so the first inference skips the 26s setup.
-                try:
-                    from moshi.offline import wrap_with_system_tags
-                    self._status("PersonaPlexManager: warming up voice prompt (first inference will be instant)...")
-                    voice_prompt_path = PERSONAPLEX_VOICE_PROMPT
-                    final_voice_prompt = _ensure_voice_prompt_exists(voice_prompt_path)
-                    with torch.no_grad():
-                        if final_voice_prompt.endswith('.pt'):
-                            self.lm_gen.load_voice_prompt_embeddings(final_voice_prompt)
-                        else:
-                            self.lm_gen.load_voice_prompt(final_voice_prompt)
-                        self.lm_gen.text_prompt_tokens = self.text_tokenizer.encode(
-                            wrap_with_system_tags(PERSONAPLEX_TEXT_PROMPT)
-                        )
-                        self.mimi.reset_streaming()
-                        self.other_mimi.reset_streaming()
-                        self.lm_gen.reset_streaming()
-                        self.lm_gen.step_system_prompts(self.mimi)
-                        self.mimi.reset_streaming()  # Reset mimi encode state (matches offline.py behavior)
-                    self._primed = True
-                    self._primed_for = voice_prompt_path  # Only voice identity matters for primed check
-                    self._save_primed_state()  # Snapshot KV cache for fast restore on every call
-                    self._status("PersonaPlexManager: voice prompt warmed up and ready.")
-                except Exception as warm_err:
+            
+            # Pre-warm voice prompt so the first inference skips the 26s setup.
+            try:
+                from moshi.offline import wrap_with_system_tags
+                self._status("PersonaPlexManager: warming up voice prompt (first inference will be instant)...")
+                voice_prompt_path = PERSONAPLEX_VOICE_PROMPT
+                final_voice_prompt = _ensure_voice_prompt_exists(voice_prompt_path)
+                with torch.no_grad():
+                    if final_voice_prompt.endswith('.pt'):
+                        self.lm_gen.load_voice_prompt_embeddings(final_voice_prompt)
+                    else:
+                        self.lm_gen.load_voice_prompt(final_voice_prompt)
+                    self.lm_gen.text_prompt_tokens = self.text_tokenizer.encode(
+                        wrap_with_system_tags(PERSONAPLEX_TEXT_PROMPT)
+                    )
+                    self.mimi.reset_streaming()
+                    self.other_mimi.reset_streaming()
+                    self.lm_gen.reset_streaming()
+                    self.lm_gen.step_system_prompts(self.mimi)
+                    self.mimi.reset_streaming()  # Reset mimi encode state (matches offline.py behavior)
+                self._primed = True
+                self._primed_for = voice_prompt_path  # Only voice identity matters for primed check
+                self._save_primed_state()  # Snapshot KV cache for fast restore on every call
+                self._status("PersonaPlexManager: voice prompt warmed up and ready.")
+            except Exception as warm_err:
                     logger.warning("PersonaPlexManager: voice prompt warmup failed (will warm on first inference): %s", warm_err)
                     self._primed = False
             except Exception as e:
