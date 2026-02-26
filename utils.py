@@ -531,20 +531,23 @@ class PersonaPlexManager:
                     torch.cuda.empty_cache()
 
                 if is_quantizing:
-                    self._status("PersonaPlexManager: definitive CPU weight load (numpy intermediate)...")
-                    from safetensors import safe_open
-                    state_dict = {}
+                    self._status("PersonaPlexManager: definitive CPU weight load (safetensors only)...")
+                    from safetensors.torch import load_file as st_load_file
                     
-                    if moshi_weight.endswith(".safetensors"):
-                        with safe_open(moshi_weight, framework="np", device="cpu") as f:
-                            for key in f.keys():
-                                arr = f.get_tensor(key)
-                                state_dict[key] = torch.from_numpy(arr).to(torch.bfloat16)
-                    else:
-                        # Standard torch.load for .pt files, but force CPU
-                        state_dict = torch.load(moshi_weight, map_location="cpu")
-                        if "model" in state_dict:
-                            state_dict = state_dict["model"]
+                    # Convert to safetensors if it's a .pt file, then load to CPU
+                    if not moshi_weight.endswith(".safetensors"):
+                        self._status("PersonaPlexManager: converting .pt to .safetensors for CPU load...")
+                        temp_sd = torch.load(moshi_weight, map_location="cpu")
+                        if "model" in temp_sd:
+                            temp_sd = temp_sd["model"]
+                        from safetensors.torch import save_file
+                        st_path = moshi_weight + ".safetensors"
+                        save_file(temp_sd, st_path)
+                        moshi_weight = st_path
+                        del temp_sd
+                        gc.collect()
+
+                    state_dict = st_load_file(moshi_weight, device="cpu")
                     
                     lm_kwargs = dict(loaders._lm_kwargs)
                     lm_kwargs["dep_q"] = 16
