@@ -170,6 +170,7 @@ async def main(stdscr=None, renderer_name="auto", renderer_reason="", dev_mode=F
         "vram_gb": 0.0,
         "inference_ms": 0.0,
         "recent_tokens": "",
+        "loading_stage": "Starting",
     }
     interaction_queue = asyncio.Queue()
 
@@ -186,6 +187,7 @@ async def main(stdscr=None, renderer_name="auto", renderer_reason="", dev_mode=F
     _show_startup_status(stdscr, startup_lines)
 
     def _status_callback(message: str):
+        state["loading_stage"] = message
         # If this message is a completion (contains 'loaded' or 'Model ready'), 
         # try to replace the matching 'Loading' line if it's the last one.
         if ("loaded" in message or "ready" in message) and startup_lines:

@@ -262,6 +262,7 @@ class TUIRenderer:
         recent_toks = self.state.get("recent_tokens", "")
         
         debug_lines = [
+            f"Debug | Loading: {self.state.get('loading_stage', 'Unknown')}",
             f"Debug | Phase: {self.state.get('processing_phase', 'idle')} | VRAM: {vram:.2f} GB | Inf: {inf_ms:.1f} ms/frame",
             f"Debug | Voice: {self.state.get('voice_mode')}/{self.state.get('voice_server_state')}/{self.state.get('voice_activity_state')}",
             f"Debug | Tokens: {recent_toks[-max_x+10:]}", # Show last visible segment
