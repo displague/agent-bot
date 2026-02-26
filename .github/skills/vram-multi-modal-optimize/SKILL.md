@@ -18,42 +18,38 @@ Use this skill when the app crashes with `CUDA error: out of memory` or `Offset 
 
 **Post-load PyTorch quantization (`--quantize 4bit`) yields only ~0.21 GB VRAM savings — not the expected ~7 GB.**
 
-Root cause: All large Moshi weight matrices live in fused-ops layers (`gating`, `linear_in`, `linear_out`, `out_proj`) that access `.weight` directly and **must be skipped** during quantization. Only small misc layers get quantized.
+Root cause: All large Moshi weight matrices live in fused-ops layers (`gating`, `linear_in`, `linear_out`, `out_proj`) that access `.weight` directly and **must be skipped** during naive quantization. Only small misc layers get quantized.
+
+**The VRAM Spike Blocker:**
+Attempting to quantize these layers with a custom `_QuantizedLinear` that dequantizes in the `forward()` pass results in a massive VRAM spike (doubling usage up to 30GB+) because the dequantized weights are held in VRAM during computation.
 
 **The correct path for real VRAM reduction:**
-- The MLX reference project (`external/personaplex-mlx`) downloads **pre-quantized model files** from HuggingFace (`nvidia/personaplex-7b-v1/model.q4.safetensors`). The weights are stored quantized on disk — not post-load quantized.
-- For PyTorch: `bitsandbytes` (4-bit NF4/INT8) or GGUF format would be needed.
-- Track progress in GH #8 (post-load ineffectiveness) and #9 (pre-quantized HF file research).
+- Switch to **pre-quantized model files** using `bitsandbytes` or GGUF.
+- We currently use `model_bnb_4bit.pt` from the `brianmatzelle/personaplex-7b-v1-bnb-4bit` community repo.
+- This allows computation to happen directly on the quantized weights using native `bitsandbytes` kernels.
 
 ## Memory Management Strategies
 
-1. **Warm Generator Pattern**:
+1. **CPU-First Weight Loading**:
+   - Always load the 14GB payload into system RAM first (`device="cpu"`) via `safetensors` or `torch.load(..., map_location='cpu')`.
+   - Quantize on CPU (if needed) then move the reduced model to GPU.
+   - Use `CUDA_VISIBLE_DEVICES=""` during load to definitively isolate the GPU.
+
+2. **Warm Generator Pattern**:
    - Reuse the `self.lm_gen` instance in `PersonaPlexManager` to avoid frequent OOMs during re-allocation.
    - Use `_restore_primed_state()` (not `reset_streaming()`) to clear state between turns — this clones saved CPU tensors back to GPU.
-
-2. **torch.no_grad()**:
-   - All 5 inference lock sections in `utils.py` are wrapped in `torch.no_grad()`. Keep it that way.
+   - **Crucial**: Call `lm_gen.reset_streaming()` *before* restoring state to avoid repeated greeting phrases.
 
 3. **Memory Cleanup**:
-   - Use `torch.cuda.empty_cache()` before starting heavy generation phases.
-   - Monitor the startup telemetry for VRAM impact per component.
-
-## Graph Capture Stability
-
-1. **Prefer Eager Mode**:
-   - Set `PERSONAPLEX_OPTIMIZE = "eager"` if encountering `AssertionError` or `IndexError`.
-   - Eager mode is currently the most stable path for Windows + Moshi.
-
-2. **Idempotent Patching**:
-   - Always check `_is_patched` before applying monkeypatches to avoid recursion.
+   - Use `gc.collect()` and `torch.cuda.empty_cache()` before starting heavy weight transfers.
+   - Monitor the Esc debug screen for real-time `VRAM` and `Inf` latency.
 
 ## Inference Speed
 
 Current speed: ~500ms/frame. Real-time budget: 80ms/frame. We are ~6x too slow.
 
-- Bottleneck is full-precision 7B inference on maxed VRAM.
-- Real quantization (bitsandbytes, GGUF, or pre-quantized HF files) is required to improve speed.
-- `torch.compile` / CUDA graphs would help once VRAM is freed.
+- Bottleneck is VRAM-to-System-RAM overflow (swapping) when usage exceeds 16GB.
+- Real quantization (`bitsandbytes` NF4) is required to keep the model under 10GB and achieve real-time speed.
 
 ## Diagnostics
 
