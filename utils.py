@@ -308,36 +308,9 @@ class PersonaPlexManager:
             except Exception:
                 pass
 
-    def _apply_optimizations(self):
-        """Apply torch.compile and CUDA graph optimizations based on config."""
-        if self._optimizations_applied:
-            return
-        self._optimizations_applied = True
-        opt = PERSONAPLEX_OPTIMIZE.lower()
-        
-        # 1. Set environment variables based on strategy
-        use_compile = (opt in ["auto", "compile", "graphs"])
-        use_graphs = (opt in ["auto", "graphs"])
-
-        if use_compile:
-            logger.info("PersonaPlexManager: enabling torch.compile (unsetting NO_TORCH_COMPILE).")
-            os.environ.pop("NO_TORCH_COMPILE", None)
-            os.environ.pop("TORCH_COMPILE_DISABLE", None)
-        else:
-            logger.info("PersonaPlexManager: disabling torch.compile.")
-            os.environ["NO_TORCH_COMPILE"] = "1"
-            os.environ["TORCH_COMPILE_DISABLE"] = "1"
-
-        if use_graphs:
-            logger.info("PersonaPlexManager: allowing CUDA graphs (unsetting NO_CUDA_GRAPH).")
-            os.environ.pop("NO_CUDA_GRAPH", None)
-            self._patch_cuda_graphs(disable=False)
-        else:
-            logger.info("PersonaPlexManager: disabling CUDA graphs.")
-            os.environ["NO_CUDA_GRAPH"] = "1"
-            self._patch_cuda_graphs(disable=True)
-
-        # 2. Fix Moshi's broken streaming propagation logic (even in eager mode)
+    def _apply_patches(self):
+        """Apply monkeypatches to moshi/personaplex source at runtime."""
+        # 1. Fix Moshi's broken streaming propagation logic (even in eager mode)
         try:
             import moshi.modules.streaming
             if not getattr(moshi.modules.streaming.StreamingModule, "_is_patched", False):
@@ -366,23 +339,67 @@ class PersonaPlexManager:
         except Exception as e:
             logger.warning("PersonaPlexManager: failed to patch moshi StreamingModule: %s", e)
 
-    def _patch_cuda_graphs(self, disable: bool):
-        """Patch moshi.models.lm.CUDAGraphed to set the disable flag."""
-        self._last_patch_disable = disable
+        # 2. Patch LMGen.load_voice_prompt_embeddings to force CPU load
         try:
             import moshi.models.lm
-            if getattr(moshi.models.lm.CUDAGraphed, "_is_patched", False):
-                return
-            original_init = moshi.models.lm.CUDAGraphed.__init__
-            def patched_init(self, func, warmup_steps=1, disable_orig=False, **kwargs):
-                # We ignore the model's 'disable' hint and use our global one
-                target_disable = kwargs.get('disable', disable_orig)
-                original_init(self, func, warmup_steps=warmup_steps, disable=disable)
-            moshi.models.lm.CUDAGraphed.__init__ = patched_init
-            moshi.models.lm.CUDAGraphed._is_patched = True
-            logger.info("PersonaPlexManager: patched moshi CUDAGraphed.")
+            if not getattr(moshi.models.lm.LMGen, "_is_patched", False):
+                original_load = moshi.models.lm.LMGen.load_voice_prompt_embeddings
+                def patched_load_voice_prompt_embeddings(self, path: str):
+                    self.voice_prompt = path
+                    import torch
+                    state = torch.load(path, map_location='cpu')
+                    self.voice_prompt_audio = None
+                    self.voice_prompt_embeddings = state["embeddings"].to(self.lm_model.device)
+                    self.voice_prompt_cache = state["cache"].to(self.lm_model.device)
+                
+                moshi.models.lm.LMGen.load_voice_prompt_embeddings = patched_load_voice_prompt_embeddings
+                moshi.models.lm.LMGen._is_patched = True
+                logger.info("PersonaPlexManager: patched LMGen.load_voice_prompt_embeddings (map_location='cpu').")
         except Exception as e:
-            logger.warning("PersonaPlexManager: failed to patch moshi CUDA graphs: %s", e)
+            logger.warning("PersonaPlexManager: failed to patch LMGen: %s", e)
+
+        # 3. Patch CUDAGraphed to set the disable flag based on config
+        try:
+            import moshi.models.lm
+            if not getattr(moshi.models.lm.CUDAGraphed, "_is_patched", False):
+                original_init = moshi.models.lm.CUDAGraphed.__init__
+                # We use a closure to capture the current optimization setting
+                target_disable = (PERSONAPLEX_OPTIMIZE.lower() not in ["auto", "graphs"])
+                def patched_init(self, func, warmup_steps=1, disable_orig=False, **kwargs):
+                    original_init(self, func, warmup_steps=warmup_steps, disable=target_disable)
+                moshi.models.lm.CUDAGraphed.__init__ = patched_init
+                moshi.models.lm.CUDAGraphed._is_patched = True
+                logger.info(f"PersonaPlexManager: patched moshi CUDAGraphed (disable={target_disable}).")
+        except Exception as e:
+            logger.warning("PersonaPlexManager: failed to patch moshi CUDAGraphed: %s", e)
+
+    def _apply_optimizations(self):
+        """Apply torch.compile and CUDA graph optimizations based on config."""
+        if self._optimizations_applied:
+            return
+        self._optimizations_applied = True
+        
+        # Apply monkeypatches first
+        self._apply_patches()
+        
+        opt = PERSONAPLEX_OPTIMIZE.lower()
+        
+        # Set environment variables based on strategy
+        use_compile = (opt in ["auto", "compile", "graphs"])
+
+        if use_compile:
+            logger.info("PersonaPlexManager: enabling torch.compile (unsetting NO_TORCH_COMPILE).")
+            os.environ.pop("NO_TORCH_COMPILE", None)
+            os.environ.pop("TORCH_COMPILE_DISABLE", None)
+        else:
+            logger.info("PersonaPlexManager: disabling torch.compile.")
+            os.environ["NO_TORCH_COMPILE"] = "1"
+            os.environ["TORCH_COMPILE_DISABLE"] = "1"
+
+        if opt in ["auto", "graphs"]:
+            os.environ.pop("NO_CUDA_GRAPH", None)
+        else:
+            os.environ["NO_CUDA_GRAPH"] = "1"
 
     def _save_primed_state(self):
         """Snapshot the lm_gen streaming state after step_system_prompts.
@@ -496,17 +513,32 @@ class PersonaPlexManager:
                 # 3) Load Moshi LM
                 start = time.perf_counter()
                 self._status("PersonaPlexManager: loading moshi lm...")
-                moshi_weight = hf_hub_download(self.repo, loaders.MOSHI_NAME)
+                
+                # Determine repo and filename based on quantization
+                target_repo = self.repo
+                target_filename = loaders.MOSHI_NAME
+                if quantize_type == "4bit":
+                    target_repo = "brianmatzelle/personaplex-7b-v1-bnb-4bit"
+                    target_filename = "model_bnb_4bit.pt"
+                    self._status(f"PersonaPlexManager: using pre-quantized model from {target_repo}")
+
+                moshi_weight = hf_hub_download(target_repo, target_filename)
                 
                 if is_quantizing:
                     self._status("PersonaPlexManager: definitive CPU weight load (numpy intermediate)...")
                     from safetensors import safe_open
                     state_dict = {}
-                    with safe_open(moshi_weight, framework="np", device="cpu") as f:
-                        for key in f.keys():
-                            # Load as numpy array first, then convert to CPU tensor
-                            arr = f.get_tensor(key)
-                            state_dict[key] = torch.from_numpy(arr).to(torch.bfloat16)
+                    
+                    if moshi_weight.endswith(".safetensors"):
+                        with safe_open(moshi_weight, framework="np", device="cpu") as f:
+                            for key in f.keys():
+                                arr = f.get_tensor(key)
+                                state_dict[key] = torch.from_numpy(arr).to(torch.bfloat16)
+                    else:
+                        # Standard torch.load for .pt files, but force CPU
+                        state_dict = torch.load(moshi_weight, map_location="cpu")
+                        if "model" in state_dict:
+                            state_dict = state_dict["model"]
                     
                     lm_kwargs = dict(loaders._lm_kwargs)
                     lm_kwargs["dep_q"] = 16
