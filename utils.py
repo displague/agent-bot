@@ -483,33 +483,33 @@ class PersonaPlexManager:
                 moshi_weight = hf_hub_download(self.repo, loaders.MOSHI_NAME)
                 
                 quantize_type = getattr(_config, "PERSONAPLEX_QUANTIZE", "")
-                
-                # If quantizing, load on CPU first to avoid OOM during the initial weights load.
-                # quantize_model_after_load will handle the move to GPU after conversion.
                 is_quantizing = (quantize_type and quantize_type not in ("none", "None"))
-                target_load_device = "cpu" if is_quantizing else self.device
-                
-                # Temporarily force default device to CPU to be absolutely sure no 
-                # implicit allocations happen on GPU during the loaders.get_moshi_lm call.
-                try:
-                    old_default_device = torch.get_default_device() if hasattr(torch, "get_default_device") else None
-                    if is_quantizing:
-                        torch.set_default_device("cpu")
-                    
-                    self.lm = loaders.get_moshi_lm(moshi_weight, device=target_load_device, cpu_offload=self.cpu_offload)
-                finally:
-                    if is_quantizing and old_default_device:
-                        torch.set_default_device(old_default_device)
-
-                self.lm.eval()
                 
                 if is_quantizing:
+                    self._status("PersonaPlexManager: manual CPU weight load (bypassing CUDA)...")
+                    # Manual load to ensure we never touch CUDA during the 14GB payload load
+                    from safetensors import safe_open
+                    state_dict = {}
+                    with safe_open(moshi_weight, framework="pt", device="cpu") as f:
+                        for key in f.keys():
+                            state_dict[key] = f.get_tensor(key)
+                    
+                    # Create model on CPU
+                    lm_kwargs = dict(loaders._lm_kwargs)
+                    lm_kwargs["dep_q"] = 16
+                    from moshi.models.lm import LMModel
+                    self.lm = LMModel(device="cpu", dtype=torch.bfloat16, **lm_kwargs)
+                    self.lm.load_state_dict(state_dict, strict=False, assign=True)
+                    del state_dict
+                    gc.collect()
+                    
                     from quantize import quantize_model_after_load
                     self._status(f"PersonaPlexManager: applying {quantize_type} quantization (on CPU then moving to {self.device})...")
                     self.lm = quantize_model_after_load(self.lm, quantize_type, device=self.device)
-                elif not self.cpu_offload and target_load_device == "cpu":
-                    self.lm.to(self.device)
+                else:
+                    self.lm = loaders.get_moshi_lm(moshi_weight, device=self.device, cpu_offload=self.cpu_offload)
                 
+                self.lm.eval()
                 dur = time.perf_counter() - start
                 vram_now = get_vram()
                 self._status(f"PersonaPlexManager: moshi loaded in {dur:.1f}s (VRAM: {vram_now:.2f}GB, +{vram_now-vram_before:.2f}GB)")
