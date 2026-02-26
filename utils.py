@@ -32,6 +32,7 @@ from config import (
     VOICE_SAMPLE_RATE,
     VOICE_CHUNK_SECONDS,
 )
+import config as _config
 
 try:
     import sounddevice as sd
@@ -181,7 +182,7 @@ class PersonaPlexStreamingSession:
         self.manager._apply_optimizations()
         self.manager.load()
 
-        with self.manager._lock:
+        with torch.no_grad(), self.manager._lock:
             self.lm_gen = self.manager.lm_gen
             self.frame_size = int(self.manager.mimi.sample_rate / self.manager.mimi.frame_rate)
 
@@ -211,7 +212,7 @@ class PersonaPlexStreamingSession:
             self.start()
             
         # Use manager._lock so step() is mutually exclusive with infer_stream/infer.
-        with self.manager._lock:
+        with torch.no_grad(), self.manager._lock:
             all_out_pcms = []
             new_texts = []
             
@@ -227,10 +228,14 @@ class PersonaPlexStreamingSession:
                     codes = torch.as_tensor(
                         SILENCE_TOKENS, dtype=torch.long, device=self.manager.device
                     ).view(1, 8, 1)
+                    _ = self.manager.other_mimi.encode(
+                        torch.zeros(1, 1, self.frame_size, device=self.manager.device)
+                    )  # keep other_mimi codec state in sync
                 else:
                     sub_chunk = np.ascontiguousarray(sub_chunk)
                     chunk_ts = torch.from_numpy(sub_chunk).to(self.manager.device).unsqueeze(0).unsqueeze(0)
                     codes = self.manager.mimi.encode(chunk_ts)
+                    _ = self.manager.other_mimi.encode(chunk_ts)  # state sync only — discard
                 
                 tokens = self.lm_gen.step(codes)
                 
@@ -240,7 +245,10 @@ class PersonaPlexStreamingSession:
                     self.all_text_tokens.append(piece)
                     new_texts.append(piece)
                 
-                out_pcm = self.manager.other_mimi.decode(tokens[:, 1 : self.manager.lm.dep_q + 1])
+                # Use mimi (not other_mimi) for decode — mimi holds the correct audio codec state.
+                # other_mimi.decode() is called as a discard to keep its state in sync.
+                out_pcm = self.manager.mimi.decode(tokens[:, 1 : self.manager.lm.dep_q + 1])
+                _ = self.manager.other_mimi.decode(tokens[:, 1 : self.manager.lm.dep_q + 1])
                 all_out_pcms.append(out_pcm.cpu().detach().numpy().squeeze())
             
             final_audio = np.concatenate(all_out_pcms) if all_out_pcms else None
@@ -464,7 +472,13 @@ class PersonaPlexManager:
                 # Ensure device is correctly passed and cpu_offload is handled
                 self.lm = loaders.get_moshi_lm(moshi_weight, device=self.device, cpu_offload=self.cpu_offload)
                 self.lm.eval()
-                if not self.cpu_offload:
+                # Optional quantization — reduces VRAM from ~14 GB to ~8-10 GB (8bit) or ~5-7 GB (4bit)
+                quantize_type = getattr(_config, "PERSONAPLEX_QUANTIZE", "")
+                if quantize_type and quantize_type not in ("none", "None"):
+                    from quantize import quantize_model_after_load
+                    self._status(f"PersonaPlexManager: applying {quantize_type} quantization…")
+                    self.lm = quantize_model_after_load(self.lm, quantize_type, device=self.device)
+                elif not self.cpu_offload:
                     self.lm.to(self.device)
                 dur = time.perf_counter() - start
                 vram_now = get_vram()
@@ -498,18 +512,19 @@ class PersonaPlexManager:
                     self._status("PersonaPlexManager: warming up voice prompt (first inference will be instant)...")
                     voice_prompt_path = PERSONAPLEX_VOICE_PROMPT
                     final_voice_prompt = _ensure_voice_prompt_exists(voice_prompt_path)
-                    if final_voice_prompt.endswith('.pt'):
-                        self.lm_gen.load_voice_prompt_embeddings(final_voice_prompt)
-                    else:
-                        self.lm_gen.load_voice_prompt(final_voice_prompt)
-                    self.lm_gen.text_prompt_tokens = self.text_tokenizer.encode(
-                        wrap_with_system_tags(PERSONAPLEX_TEXT_PROMPT)
-                    )
-                    self.mimi.reset_streaming()
-                    self.other_mimi.reset_streaming()
-                    self.lm_gen.reset_streaming()
-                    self.lm_gen.step_system_prompts(self.mimi)
-                    self.mimi.reset_streaming()  # Reset mimi encode state (matches offline.py behavior)
+                    with torch.no_grad():
+                        if final_voice_prompt.endswith('.pt'):
+                            self.lm_gen.load_voice_prompt_embeddings(final_voice_prompt)
+                        else:
+                            self.lm_gen.load_voice_prompt(final_voice_prompt)
+                        self.lm_gen.text_prompt_tokens = self.text_tokenizer.encode(
+                            wrap_with_system_tags(PERSONAPLEX_TEXT_PROMPT)
+                        )
+                        self.mimi.reset_streaming()
+                        self.other_mimi.reset_streaming()
+                        self.lm_gen.reset_streaming()
+                        self.lm_gen.step_system_prompts(self.mimi)
+                        self.mimi.reset_streaming()  # Reset mimi encode state (matches offline.py behavior)
                     self._primed = True
                     self._primed_for = voice_prompt_path  # Only voice identity matters for primed check
                     self._save_primed_state()  # Snapshot KV cache for fast restore on every call
@@ -551,7 +566,7 @@ class PersonaPlexManager:
         final_text_prompt = text_prompt or PERSONAPLEX_TEXT_PROMPT
         final_voice_prompt = _ensure_voice_prompt_exists(voice_prompt_path)
 
-        with self._lock:
+        with torch.no_grad(), self._lock:
             if self._restore_primed_state():
                 # KV cache restored; just update utterance tokens
                 self.lm_gen.text_prompt_tokens = self.text_tokenizer.encode(wrap_with_system_tags(final_text_prompt))
@@ -584,13 +599,15 @@ class PersonaPlexManager:
                 chunk = np.ascontiguousarray(chunk)
                 chunk_ts = torch.from_numpy(chunk).to(self.device).unsqueeze(0).unsqueeze(0)
                 codes = self.mimi.encode(chunk_ts)
+                _ = self.other_mimi.encode(chunk_ts)  # state sync only — discard
                 
                 tokens = self.lm_gen.step(codes)
                 if tokens is None:
                     continue
                 
-                # Decode and yield audio chunk
-                out_pcm = self.other_mimi.decode(tokens[:, 1 : self.lm.dep_q + 1])
+                # Use mimi for decode; other_mimi discard keeps its state in sync
+                out_pcm = self.mimi.decode(tokens[:, 1 : self.lm.dep_q + 1])
+                _ = self.other_mimi.decode(tokens[:, 1 : self.lm.dep_q + 1])
                 pcm_np = out_pcm.cpu().detach().numpy().squeeze()
                 yield pcm_np
 
@@ -608,7 +625,7 @@ class PersonaPlexManager:
 
         final_voice_prompt = _ensure_voice_prompt_exists(voice_prompt_path)
 
-        with self._lock:
+        with torch.no_grad(), self._lock:
             if self._restore_primed_state():
                 pass  # KV cache restored; mimi/other_mimi already reset inside helper
             else:
@@ -674,7 +691,7 @@ class PersonaPlexManager:
             
         logger.debug("PersonaPlexManager: using voice prompt path: %s", final_voice_prompt)
 
-        with self._lock:
+        with torch.no_grad(), self._lock:
             if self._restore_primed_state():
                 # KV cache restored; just update utterance tokens
                 self.lm_gen.text_prompt_tokens = self.text_tokenizer.encode(wrap_with_system_tags(final_text_prompt))
@@ -718,6 +735,7 @@ class PersonaPlexManager:
                 chunk = np.ascontiguousarray(chunk)
                 chunk_ts = torch.from_numpy(chunk).to(self.device).unsqueeze(0).unsqueeze(0)
                 codes = self.mimi.encode(chunk_ts)
+                _ = self.other_mimi.encode(chunk_ts)  # state sync only — discard
                 
                 # Single step
                 tokens = self.lm_gen.step(codes)
@@ -728,9 +746,9 @@ class PersonaPlexManager:
                     piece = self.text_tokenizer.IdToPiece(text_token)
                     all_text_tokens.append(piece)
 
-                # Decode agent tokens (k=1..dep_q+1)
-                # dep_q is the number of audio codebooks
-                out_pcm = self.other_mimi.decode(tokens[:, 1 : self.lm.dep_q + 1])
+                # Use mimi for decode; other_mimi discard keeps its state in sync
+                out_pcm = self.mimi.decode(tokens[:, 1 : self.lm.dep_q + 1])
+                _ = self.other_mimi.decode(tokens[:, 1 : self.lm.dep_q + 1])
                 all_out_pcms.append(out_pcm.cpu().detach().numpy().squeeze())
             
             if all_out_pcms:

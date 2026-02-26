@@ -376,6 +376,8 @@ if __name__ == "__main__":
     parser.add_argument("--dev", action="store_true", help="Enable dev mode (disables autonomous tasks)")
     parser.add_argument("--skip-deep-reasoning", action="store_true", help="Bypass the deep reasoning LLM phase")
     parser.add_argument("--no-sleep", action="store_true", help="Disable sleep schedule; agent stays ACTIVE at all hours")
+    parser.add_argument("--quantize", choices=["8bit", "4bit"], default=None,
+                        help="Quantize PersonaPlex LM weights (8bit ~8-10 GB, 4bit ~5-7 GB)")
     args_parsed = parser.parse_args()
 
     if args_parsed.reset_logs:
@@ -394,6 +396,8 @@ if __name__ == "__main__":
         skip_reasoning = getattr(config, "SKIP_DEEP_REASONING", False)
         if args_parsed.no_sleep:
             config.NO_SLEEP = True
+        if args_parsed.quantize:
+            config.PERSONAPLEX_QUANTIZE = args_parsed.quantize
         
         curses_ok, curses_mod, reason = _check_curses_available()
 
