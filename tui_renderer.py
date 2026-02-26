@@ -79,7 +79,7 @@ class TUIRenderer:
         self.scroll_offset = 0
         self.audio_waveform = None
         self._stop = False
-        self._refresh_interval_seconds = 0.2
+        self._refresh_interval_seconds = 0.05
         self._voice_loop = voice_loop or VoiceLoop(state, interaction_log_manager)
         self.input_history = []
         self.history_index = -1

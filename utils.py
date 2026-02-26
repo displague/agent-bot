@@ -398,6 +398,10 @@ class PersonaPlexManager:
         if self._lm_primed_state is None:
             return False
         try:
+            # Ensure any stale KV cache from a previous turn is wiped before
+            # loading the clean primed state.
+            self.lm_gen.reset_streaming()
+            
             gpu_state = _streaming_state_to_device(self._lm_primed_state, self.device)
             self.lm_gen.set_streaming_state(gpu_state)
             self.mimi.reset_streaming()

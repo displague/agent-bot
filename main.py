@@ -248,6 +248,7 @@ async def main(stdscr=None, renderer_name="auto", renderer_reason="", dev_mode=F
         "audio_waveform": None,
         "override_response": "Hello! I'm online and ready.",
     })
+    await asyncio.sleep(0.1)
 
     event_scheduler = EventScheduler(
         state, interaction_log_manager, index_manager, runtime_manager=runtime_manager

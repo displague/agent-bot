@@ -63,15 +63,12 @@ class InteractionProcessor:
         
         try:
             if self.personaplex_manager:
-                # Run the synchronous generator in a thread, collect all chunks,
-                # then play as one continuous audio (avoids frame-by-frame gaps).
+                # Direct stream to playback queue (zero latency)
                 stream = self.personaplex_manager.tts_stream(
                     text=filler,
                     voice_prompt_path=PERSONAPLEX_VOICE_PROMPT,
                 )
-                chunks = await asyncio.to_thread(list, stream)
-                audio = np.concatenate([c for c in chunks if c.size > 0]).astype(np.float32)
-                await self.voice_loop.say_audio(audio)
+                await self.voice_loop.say_stream(stream)
             else:
                 # Fallback to offline/sub-process if manager not loaded
                 with tempfile.TemporaryDirectory(prefix="filler_") as tmpdir:
@@ -156,15 +153,12 @@ class InteractionProcessor:
                         # Speak final deep response aloud
                         try:
                             if self.personaplex_manager:
-                                # Run the synchronous generator in a thread, collect all chunks,
-                                # then play as one continuous audio (avoids frame-by-frame gaps).
+                                # Direct stream to playback queue (zero latency)
                                 stream = self.personaplex_manager.tts_stream(
                                     text=response,
                                     voice_prompt_path=PERSONAPLEX_VOICE_PROMPT,
                                 )
-                                chunks = await asyncio.to_thread(list, stream)
-                                audio = np.concatenate([c for c in chunks if c.size > 0]).astype(np.float32)
-                                await self.voice_loop.say_audio(audio)
+                                await self.voice_loop.say_stream(stream)
                             else:
                                 with tempfile.TemporaryDirectory(prefix="final_") as tmpdir:
                                     input_wav = os.path.join(tmpdir, "silence.wav")

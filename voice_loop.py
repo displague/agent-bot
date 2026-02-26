@@ -155,6 +155,60 @@ class VoiceLoop:
             # Match the playback rate roughly
             await asyncio.sleep(VOICE_CHUNK_SECONDS * 0.8)
 
+    async def say_stream(self, sync_iterator):
+        """Consume a synchronous audio generator and stream to the playback queue.
+        
+        This bridges the synchronous tts_stream generator to the async playback
+        loop, allowing the agent to start speaking as soon as the first chunk
+        is generated.
+        """
+        self._speaking = True
+        await self._set_activity("speaking", "speaking")
+        self._playback_interrupt.clear()
+        
+        loop = asyncio.get_running_loop()
+        
+        def _run_gen():
+            try:
+                for chunk in sync_iterator:
+                    if self._playback_interrupt.is_set() or self._stop_event.is_set():
+                        break
+                    if chunk is not None and chunk.size > 0:
+                        loop.call_soon_threadsafe(self._playback_queue.put_nowait, chunk)
+            except Exception as e:
+                logger.error("say_stream generator error: %s", e)
+
+        try:
+            # Run the generator in a thread to keep the event loop free
+            await asyncio.to_thread(_run_gen)
+            
+            # Wait for playback queue to empty before finishing,
+            # or until interrupted.
+            while not self._playback_queue.empty() and not self._playback_interrupt.is_set():
+                await asyncio.sleep(0.1)
+                
+            if self._playback_interrupt.is_set():
+                await self._set_activity("interrupted", "playback interrupted")
+            else:
+                await self._set_activity("listening", "playback complete")
+        finally:
+            self._speaking = False
+            # Invalidate the streaming session — tts_stream modified lm_gen state,
+            # so the next session must start fresh with _restore_primed_state().
+            self._streaming_session = None
+            
+            # Drain stale audio accumulated during TTS
+            drained = 0
+            if self._audio_queue is not None:
+                while not self._audio_queue.empty():
+                    try:
+                        self._audio_queue.get_nowait()
+                        drained += 1
+                    except Exception:
+                        break
+            if drained:
+                logger.debug("say_stream: drained %d stale audio chunks", drained)
+
     async def say_audio(self, pcm: "np.ndarray") -> None:
         """Play a pre-rendered continuous PCM array as one uninterrupted utterance.
 
@@ -216,7 +270,8 @@ class VoiceLoop:
         import sounddevice as sd
         while not self._stop_event.is_set():
             try:
-                chunk = await asyncio.wait_for(self._playback_queue.get(), timeout=0.2)
+                # Use a small timeout to keep the loop responsive to stop events
+                chunk = await asyncio.wait_for(self._playback_queue.get(), timeout=0.1)
                 if chunk is None or chunk.size == 0:
                     continue
                 
@@ -224,20 +279,39 @@ class VoiceLoop:
                 if np.abs(chunk).max() < 1e-5:
                     continue
 
-                self._speaking = True
+                # say_stream/say_audio already set _speaking=True, but we ensure it
+                # here for chunks injected from other sources or if state drifted.
+                was_speaking = self._speaking
+                if not was_speaking:
+                    self._speaking = True
+                    await self._set_activity("speaking", "playback started")
+
                 dev_idx = sd.default.device[1]
                 logger.debug("Playback loop: playing chunk on device %s", dev_idx)
+                
+                # Calculate precise duration to avoid gaps or overlaps
+                duration = len(chunk) / VOICE_SAMPLE_RATE
+                
                 sd.play(chunk, samplerate=VOICE_SAMPLE_RATE)
-                # Wait for this chunk to finish before next one
-                # Chunk duration is VOICE_CHUNK_SECONDS (default 0.4s)
-                await asyncio.sleep(VOICE_CHUNK_SECONDS * 0.95)
-                self._speaking = False
+                
+                # Sleep for slightly less than the duration to allow for event loop
+                # overhead and ensure the next chunk is ready in time.
+                # Factor reduced to 0.92 to be more proactive against gaps.
+                await asyncio.sleep(duration * 0.92)
+                
+                # Only reset _speaking if the queue is actually empty, 
+                # otherwise we are still in a continuous utterance.
+                if self._playback_queue.empty():
+                    self._speaking = False
+                    await self._set_activity("listening", "playback finished")
+
             except asyncio.TimeoutError:
                 continue
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 logger.error("Playback loop error: %s", e)
+                self._speaking = False
                 await asyncio.sleep(0.1)
 
     async def _listen_loop(self):
