@@ -663,11 +663,15 @@ class PersonaPlexManager:
                 )
                 if tokens is None:
                     continue
+                
+                # Captured piece from teacher-forcing
+                piece = self.text_tokenizer.IdToPiece(text_token)
+                
                 out_pcm = self.mimi.decode(tokens[:, 1 : self.lm.dep_q + 1])
                 pcm_np = out_pcm.cpu().detach().numpy().squeeze()
                 logger.debug("tts_stream: frame amp max=%.6f tok=%d",
                              float(np.abs(pcm_np).max()), text_token)
-                yield pcm_np
+                yield pcm_np, piece
 
             # Run a few silence frames to flush trailing audio (codec has lookahead delay)
             for _ in range(self.lm_gen.audio_silence_frame_cnt):
@@ -678,7 +682,7 @@ class PersonaPlexManager:
                 if tokens is None:
                     continue
                 out_pcm = self.mimi.decode(tokens[:, 1 : self.lm.dep_q + 1])
-                yield out_pcm.cpu().detach().numpy().squeeze()
+                yield out_pcm.cpu().detach().numpy().squeeze(), ""
 
     def infer(self, text_prompt: str, voice_prompt_path: str, input_wav_path: str, output_wav_path: str, output_text_path: Optional[str] = None):
         """Synchronous inference implementation using the warm models."""
@@ -772,19 +776,17 @@ class PersonaPlexManager:
             return output_wav_path
 
     def hear_stream(self, heard_text: str, voice_prompt_path: str, user_wav_path: str = None):
-        """Conversational inference: feed user speech to PersonaPlex, yield agent PCM frames.
+        """Conversational inference: feed user speech to PersonaPlex, yield (PCM, text) chunks.
 
-        If *user_wav_path* is given, that audio file is used as the user's voice input
-        (any format — converted via ffmpeg if needed).  Otherwise *heard_text* is
-        synthesised to speech via text_to_wav().
+        If *user_wav_path* is given, that audio file is used as the user's voice input.
+        Otherwise *heard_text* is synthesised to speech via text_to_wav().
 
-        Unlike tts_stream (which teacher-forces the LM to say specific words),
-        this uses the full conversational path: the model *hears* the user
+        This uses the full conversational path: the model *hears* the user
         speaking and generates its natural response in the PersonaPlex voice.
-
-        Yields numpy float32 arrays (one per mimi frame, 1920 samples @ 24 kHz).
+        Yields chunks as they are generated (zero-latency).
         """
         import tempfile as _tempfile
+        from moshi.offline import wrap_with_system_tags
 
         _TRAILING_SILENCE_S = 4.0   # seconds of silence after speech — gives model time to respond
         _LEADING_SILENCE_AMP = 0.02  # skip leading output frames that are nearly silent
@@ -792,48 +794,87 @@ class PersonaPlexManager:
 
         with _tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as _f:
             user_wav = _f.name
-        with _tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as _f:
-            agent_wav = _f.name
         try:
             if user_wav_path:
                 _convert_to_wav(user_wav_path, user_wav, sample_rate=_sample_rate)
             else:
                 text_to_wav(heard_text, user_wav, sample_rate=_sample_rate)
 
+            # Process input WAV
+            input_data, _ = sf.read(user_wav, dtype="float32")
+            if input_data.ndim > 1:
+                input_data = input_data.mean(-1)
+            
             # Append trailing silence so the model has time to formulate a response.
-            # Without this, infer() only processes ~2s of audio (~25 frames) —
-            # not enough for the model to generate a reply.
-            tts_data, tts_sr = sf.read(user_wav, dtype="float32")
-            user_speech_samples = len(tts_data)  # track where user speech ends
-            trailing = np.zeros(int(tts_sr * _TRAILING_SILENCE_S), dtype=np.float32)
-            sf.write(user_wav, np.concatenate([tts_data, trailing]), tts_sr)
+            trailing = np.zeros(int(_sample_rate * _TRAILING_SILENCE_S), dtype=np.float32)
+            full_input = np.concatenate([input_data, trailing])
+            user_speech_samples = len(input_data)
 
-            self.infer(
-                text_prompt=PERSONAPLEX_TEXT_PROMPT,
-                voice_prompt_path=voice_prompt_path,
-                input_wav_path=user_wav,
-                output_wav_path=agent_wav,
-            )
-            if os.path.exists(agent_wav):
-                data, _ = sf.read(agent_wav, dtype="float32")
-                frame = int(self.mimi.sample_rate / self.mimi.frame_rate)
-                # In full-duplex mode the model generates one output frame per input
-                # frame — including while the user is still speaking. Those "overlap"
-                # frames are the model trying to talk over the user and are almost
-                # always incoherent. Only play output from the silence window
-                # (after user speech ends) where the model actually responds.
-                speech_frame_start = (user_speech_samples // frame) * frame
+            self._apply_optimizations()
+            self.load()
+            
+            final_voice_prompt = _ensure_voice_prompt_exists(voice_prompt_path)
+
+            with torch.no_grad(), self._lock:
+                if self._restore_primed_state():
+                    self.lm_gen.text_prompt_tokens = self.text_tokenizer.encode(wrap_with_system_tags(PERSONAPLEX_TEXT_PROMPT))
+                else:
+                    if final_voice_prompt.endswith('.pt'):
+                        self.lm_gen.load_voice_prompt_embeddings(final_voice_prompt)
+                    else:
+                        self.lm_gen.load_voice_prompt(final_voice_prompt)
+                    self.lm_gen.text_prompt_tokens = self.text_tokenizer.encode(wrap_with_system_tags(PERSONAPLEX_TEXT_PROMPT))
+                    self.mimi.reset_streaming()
+                    self.other_mimi.reset_streaming()
+                    self.lm_gen.reset_streaming()
+                    self.lm_gen.step_system_prompts(self.mimi)
+                    self.mimi.reset_streaming()
+                    self._save_primed_state()
+
+                frame_size = int(self.mimi.sample_rate / self.mimi.frame_rate)
                 found_speech = False
-                for i in range(speech_frame_start, len(data), frame):
-                    chunk = data[i : i + frame]
-                    if not found_speech and float(np.abs(chunk).max()) < _LEADING_SILENCE_AMP:
-                        continue  # skip leading-silence frames in the response window
-                    found_speech = True
-                    yield chunk.astype(np.float32)
+                
+                for i in range(0, len(full_input), frame_size):
+                    chunk = full_input[i : i + frame_size]
+                    if len(chunk) < frame_size:
+                        chunk = np.pad(chunk, (0, frame_size - len(chunk)))
+                    
+                    chunk = np.ascontiguousarray(chunk)
+                    chunk_ts = torch.from_numpy(chunk).to(self.device).unsqueeze(0).unsqueeze(0)
+                    codes = self.mimi.encode(chunk_ts)
+                    _ = self.other_mimi.encode(chunk_ts)
+                    
+                    tokens = self.lm_gen.step(codes)
+                    if tokens is None:
+                        continue
+                    
+                    # Capture text token
+                    piece = ""
+                    text_token = tokens[0, 0].item()
+                    if text_token not in {0, 1, 2, 3}:
+                        piece = self.text_tokenizer.IdToPiece(text_token)
+
+                    # Decode audio
+                    out_pcm = self.mimi.decode(tokens[:, 1 : self.lm.dep_q + 1])
+                    _ = self.other_mimi.decode(tokens[:, 1 : self.lm.dep_q + 1])
+                    pcm_np = out_pcm.cpu().detach().numpy().squeeze()
+
+                    # In full-duplex mode only play output from the silence window
+                    # (after user speech ends) where the model actually responds.
+                    if i >= user_speech_samples:
+                        if not found_speech and float(np.abs(pcm_np).max()) < _LEADING_SILENCE_AMP:
+                            continue
+                        found_speech = True
+                        yield pcm_np, piece
+                    else:
+                        # Even if we don't yield PCM, we might want to track text tokens
+                        # generated during the "listening" phase (though usually empty).
+                        if piece:
+                            yield None, piece
+
         finally:
-            for p in (user_wav, agent_wav):
-                if os.path.exists(p):
-                    os.unlink(p)
+            if os.path.exists(user_wav):
+                os.unlink(user_wav)
 
 
 class AudioMultiplexer:

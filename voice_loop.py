@@ -167,12 +167,26 @@ class VoiceLoop:
         self._playback_interrupt.clear()
         
         loop = asyncio.get_running_loop()
+        text_buffer = []
         
         def _run_gen():
             try:
-                for chunk in sync_iterator:
+                for item in sync_iterator:
                     if self._playback_interrupt.is_set() or self._stop_event.is_set():
                         break
+                    
+                    # Handle both single PCM chunks and (PCM, text) tuples
+                    if isinstance(item, tuple):
+                        chunk, piece = item
+                    else:
+                        chunk, piece = item, ""
+                        
+                    if piece:
+                        text_buffer.append(piece)
+                        # Log text pieces as they arrive for visibility
+                        if len(text_buffer) % 5 == 0:
+                            logger.info("Voice model (streaming): %s", "".join(text_buffer[-20:]))
+
                     if chunk is not None and chunk.size > 0:
                         loop.call_soon_threadsafe(self._playback_queue.put_nowait, chunk)
             except Exception as e:
@@ -182,6 +196,10 @@ class VoiceLoop:
             # Run the generator in a thread to keep the event loop free
             await asyncio.to_thread(_run_gen)
             
+            final_text = "".join(text_buffer).strip()
+            if final_text:
+                await self.interaction_log_manager.append(f"Voice model (streaming): {final_text}")
+
             # Wait for playback queue to empty before finishing,
             # or until interrupted.
             while not self._playback_queue.empty() and not self._playback_interrupt.is_set():
