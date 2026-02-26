@@ -167,6 +167,9 @@ async def main(stdscr=None, renderer_name="auto", renderer_reason="", dev_mode=F
         "next_event": "Not scheduled",
         "is_sleeping": False,
         "is_processing": False,
+        "vram_gb": 0.0,
+        "inference_ms": 0.0,
+        "recent_tokens": "",
     }
     interaction_queue = asyncio.Queue()
 
@@ -206,8 +209,19 @@ async def main(stdscr=None, renderer_name="auto", renderer_reason="", dev_mode=F
     rolling_buffer = RollingAudioBuffer(audio_multiplexer)
     await rolling_buffer.start()
 
-    personaplex_manager = PersonaPlexManager(status_callback=_status_callback)
+    personaplex_manager = PersonaPlexManager(status_callback=_status_callback, state=state)
     
+    async def vram_monitor():
+        """Periodically update the shared state with current VRAM usage."""
+        import torch
+        while True:
+            try:
+                if torch.cuda.is_available():
+                    state["vram_gb"] = torch.cuda.memory_allocated() / (1024**3)
+            except Exception:
+                pass
+            await asyncio.sleep(5.0)
+
     # Initialize InteractionProcessor before renderers to allow hot-reloading reference
     interaction_processor = InteractionProcessor(
         interaction_queue,
@@ -291,6 +305,7 @@ async def main(stdscr=None, renderer_name="auto", renderer_reason="", dev_mode=F
         runtime_manager.register_task(asyncio.create_task(event_scheduler.start())),
         runtime_manager.register_task(asyncio.create_task(interaction_processor.start())),
         runtime_manager.register_task(asyncio.create_task(debug_server.start())),
+        runtime_manager.register_task(asyncio.create_task(vram_monitor())),
     ]
     if not dev_mode:
         background_tasks.append(

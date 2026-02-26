@@ -377,6 +377,8 @@ class VoiceLoop:
                     
                     if out_text:
                         self._streaming_text_buffer += out_text
+                        # Update rolling recent tokens for debug screen
+                        self.state["recent_tokens"] = (self.state.get("recent_tokens", "") + out_text)[-100:]
                         # Periodically update the UI with what the model is transcribing/thinking
                         if len(self._streaming_text_buffer) % 20 == 0:
                             await self._set_activity("thinking", f"Model: {self._streaming_text_buffer[-40:]}")

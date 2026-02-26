@@ -213,10 +213,13 @@ class PersonaPlexStreamingSession:
             
         # Use manager._lock so step() is mutually exclusive with infer_stream/infer.
         with torch.no_grad(), self.manager._lock:
+            start_time = time.perf_counter()
             all_out_pcms = []
             new_texts = []
             
+            num_frames = 0
             for i in range(0, len(audio_chunk), self.frame_size):
+                num_frames += 1
                 sub_chunk = audio_chunk[i : i + self.frame_size]
                 if len(sub_chunk) < self.frame_size:
                     sub_chunk = np.pad(sub_chunk, (0, self.frame_size - len(sub_chunk)))
@@ -251,6 +254,10 @@ class PersonaPlexStreamingSession:
                 _ = self.manager.other_mimi.decode(tokens[:, 1 : self.manager.lm.dep_q + 1])
                 all_out_pcms.append(out_pcm.cpu().detach().numpy().squeeze())
             
+            if num_frames > 0:
+                duration_ms = (time.perf_counter() - start_time) * 1000
+                self.manager.state["inference_ms"] = duration_ms / num_frames
+
             final_audio = np.concatenate(all_out_pcms) if all_out_pcms else None
             final_text = "".join(new_texts) if new_texts else None
             
@@ -260,10 +267,11 @@ class PersonaPlexStreamingSession:
 class PersonaPlexManager:
     """Manages persistent in-process PersonaPlex models for fast inference."""
     
-    def __init__(self, device: str = PERSONAPLEX_DEVICE, cpu_offload: bool = PERSONAPLEX_CPU_OFFLOAD, status_callback: Optional[Callable[[str], None]] = None):
+    def __init__(self, device: str = PERSONAPLEX_DEVICE, cpu_offload: bool = PERSONAPLEX_CPU_OFFLOAD, status_callback: Optional[Callable[[str], None]] = None, state: Optional[Dict[str, Any]] = None):
         self.device = device
         self.cpu_offload = cpu_offload
         self.status_callback = status_callback
+        self.state = state or {}
         self.mimi = None
         self.other_mimi = None
         self.lm = None

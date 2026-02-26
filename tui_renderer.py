@@ -252,26 +252,32 @@ class TUIRenderer:
             current_y += 1
 
     def render_debug_screen(self):
-        """Renders the debug screen."""
+        """Renders the debug screen with enhanced telemetry."""
         max_y, max_x = self.stdscr.getmaxyx()
         current_y = 1
+        
+        # Telemetry Summary
+        vram = self.state.get("vram_gb", 0.0)
+        inf_ms = self.state.get("inference_ms", 0.0)
+        recent_toks = self.state.get("recent_tokens", "")
+        
         debug_lines = [
-            f"Debug | phase={self.state.get('processing_phase', 'idle')} processing={self.state.get('is_processing')} unprocessed={self.state.get('unprocessed_interactions')} thoughts={self.state.get('ongoing_thoughts')}",
-            f"Debug | voice={self.state.get('voice_mode')}/{self.state.get('voice_server_state')}/{self.state.get('voice_session_state')}/{self.state.get('voice_activity_state')}",
-            f"Debug | last_input={self.state.get('last_processing_input', '')}",
-            f"Debug | last_status={self.state.get('last_processing_status', '')}",
-            f"Debug | last_error={self.state.get('last_processing_error', '')}",
+            f"Debug | Phase: {self.state.get('processing_phase', 'idle')} | VRAM: {vram:.2f} GB | Inf: {inf_ms:.1f} ms/frame",
+            f"Debug | Voice: {self.state.get('voice_mode')}/{self.state.get('voice_server_state')}/{self.state.get('voice_activity_state')}",
+            f"Debug | Tokens: {recent_toks[-max_x+10:]}", # Show last visible segment
+            f"Debug | Last Status: {self.state.get('last_processing_status', '')} | Error: {self.state.get('last_processing_error', '')}",
         ]
         for item in debug_lines:
-            wrapped = textwrap.wrap(item, max_x)
-            for line in wrapped:
-                if current_y >= max_y - 3:
-                    break
-                self._safe_addstr(current_y, 0, line)
-                current_y += 1
+            self._safe_addstr(current_y, 0, item[:max_x])
+            current_y += 1
             if current_y >= max_y - 3:
                 break
-        max_log_lines = max_y - 4
+        
+        # Room for debug log entries
+        max_log_lines = max_y - current_y - 3
+        if max_log_lines <= 0:
+            return
+            
         display_log = self.debug_log[
             -(max_log_lines + self.scroll_offset) : (
                 -self.scroll_offset if self.scroll_offset > 0 else None
