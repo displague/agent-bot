@@ -21,27 +21,18 @@ from typing import Optional
 import torch
 import torch.nn as nn
 
-try:
-    import bitsandbytes as bnb
-except ImportError:
-    bnb = None
-
 
 def quantize_model_after_load(
     model: nn.Module,
     quantize_type: str,
     device: str = "cuda",
 ) -> nn.Module:
-    """Quantize a model after loading weights and move it to *device*.
+    """Quantize a model after loading weights and move it to *device*."""
+    try:
+        import bitsandbytes as bnb
+    except ImportError:
+        bnb = None
 
-    Args:
-        model: Loaded model (may be on CPU or CUDA).
-        quantize_type: ``"8bit"``, ``"4bit"``, or ``""``/``"none"`` to skip.
-        device: Target device string.
-
-    Returns:
-        The (possibly quantized) model on *device*.
-    """
     if quantize_type in ("", "none", "None", None):
         return model.to(device)
 
@@ -95,6 +86,7 @@ class _BNBLinear4bit(nn.Module):
     """Linear layer using bitsandbytes 4-bit NF4 quantization."""
     def __init__(self, linear: nn.Linear):
         super().__init__()
+        import bitsandbytes as bnb
         self.in_features = linear.in_features
         self.out_features = linear.out_features
         
@@ -115,6 +107,7 @@ class _BNBLinear4bit(nn.Module):
     @property
     def weight(self) -> torch.Tensor:
         """Dequantize weights on-the-fly for direct access by multi_linear fused ops."""
+        import bitsandbytes as bnb
         # Use bnb's internal dequantization — works on GPU and CPU (for recent versions)
         return bnb.functional.dequantize_4bit(
             self.bnb_layer.weight.data, 
@@ -129,6 +122,7 @@ class _BNBLinear8bit(nn.Module):
     """Linear layer using bitsandbytes 8-bit quantization."""
     def __init__(self, linear: nn.Linear):
         super().__init__()
+        import bitsandbytes as bnb
         self.in_features = linear.in_features
         self.out_features = linear.out_features
         
@@ -144,6 +138,7 @@ class _BNBLinear8bit(nn.Module):
 
     @property
     def weight(self) -> torch.Tensor:
+        import bitsandbytes as bnb
         # 8-bit dequantization logic
         if self.bnb_layer.weight.device.type == 'cuda':
             # bitsandbytes 8bit doesn't have a simple functional dequantize like 4bit,
@@ -219,6 +214,11 @@ _MIN_LAYER_SIZE = 1024  # don't bother quantizing tiny layers
 
 def _quantize_inplace(model: nn.Module, quantize_type: str) -> int:
     """Replace eligible nn.Linear layers with a quantized version in-place."""
+    try:
+        import bitsandbytes as bnb
+    except ImportError:
+        bnb = None
+
     replacements = []
     module_map = dict(model.named_modules())
 
