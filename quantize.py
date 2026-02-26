@@ -141,9 +141,8 @@ class _QuantizedLinear(nn.Module):
 # replacing them with QuantizedLinear would break the model.
 _SKIP_PATTERNS = [
     "embed", "emb", "lm_head", "out_proj", "output",
-    "norm", "gating",
+    "norm", "gating", "linear_in", "linear_out",
 ]
-# Note: "out_proj" restored to skip list. "linear_in" and "linear_out" remain candidates.
 _MIN_LAYER_SIZE = 1024  # don't bother quantizing tiny layers
 
 
