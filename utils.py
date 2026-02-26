@@ -481,21 +481,23 @@ class PersonaPlexManager:
                 start = time.perf_counter()
                 self._status("PersonaPlexManager: loading moshi lm...")
                 moshi_weight = hf_hub_download(self.repo, loaders.MOSHI_NAME)
-                # Ensure device is correctly passed and cpu_offload is handled
-                self.lm = loaders.get_moshi_lm(moshi_weight, device=self.device, cpu_offload=self.cpu_offload)
-                self.lm.eval()
-                # Optional quantization — reduces VRAM from ~14 GB to ~8-10 GB (8bit) or ~5-7 GB (4bit)
-                # NOTE: Empirically only ~0.2 GB is freed on PersonaPlex because Moshi's large
-                # weight matrices live in fused-ops layers (gating/linear_in/linear_out/out_proj)
-                # that must be skipped. Use --quantize only for experimentation until a bitsandbytes-
-                # or GGUF-based approach is implemented.
+                
                 quantize_type = getattr(_config, "PERSONAPLEX_QUANTIZE", "")
+                
+                # If quantizing, load on CPU first to avoid OOM during the initial weights load.
+                # quantize_model_after_load will handle the move to GPU after conversion.
+                target_load_device = "cpu" if (quantize_type and quantize_type not in ("none", "None")) else self.device
+                
+                self.lm = loaders.get_moshi_lm(moshi_weight, device=target_load_device, cpu_offload=self.cpu_offload)
+                self.lm.eval()
+                
                 if quantize_type and quantize_type not in ("none", "None"):
                     from quantize import quantize_model_after_load
-                    self._status(f"PersonaPlexManager: applying {quantize_type} quantization (note: VRAM reduction may be minimal for Moshi architecture)…")
+                    self._status(f"PersonaPlexManager: applying {quantize_type} quantization (on CPU then moving to {self.device})...")
                     self.lm = quantize_model_after_load(self.lm, quantize_type, device=self.device)
-                elif not self.cpu_offload:
+                elif not self.cpu_offload and target_load_device == "cpu":
                     self.lm.to(self.device)
+                
                 dur = time.perf_counter() - start
                 vram_now = get_vram()
                 self._status(f"PersonaPlexManager: moshi loaded in {dur:.1f}s (VRAM: {vram_now:.2f}GB, +{vram_now-vram_before:.2f}GB)")
@@ -513,10 +515,10 @@ class PersonaPlexManager:
                     frame_rate=self.mimi.frame_rate,
                     save_voice_prompt_embeddings=False,
                     use_sampling=True,
-                    temp=0.8,
-                    temp_text=0.7,
-                    top_k=250,       # MLX default; top_k=1 caused greedy decoding → always same output
-                    top_k_text=25,   # MLX default; top_k_text=1 caused repetitive text tokens
+                    temp=0.7,
+                    temp_text=0.0,   # Greedy text
+                    top_k=50,
+                    top_k_text=1,    # Greedy text
                 )
                 self.lm_gen.streaming_forever(1)
                 

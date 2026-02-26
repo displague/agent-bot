@@ -236,6 +236,29 @@ async def main(stdscr=None, renderer_name="auto", renderer_reason="", dev_mode=F
     voice_loop = VoiceLoop(state, interaction_log_manager, personaplex_manager=personaplex_manager, audio_multiplexer=audio_multiplexer)
     interaction_processor.voice_loop = voice_loop
 
+    # Initialize and start renderer early so loading progress is visible
+    if stdscr is not None:
+        from tui_renderer import TUIRenderer  # noqa: PLC0415
+
+        ui_renderer = TUIRenderer(
+            stdscr,
+            state,
+            interaction_queue,
+            interaction_log_manager,
+            interaction_processor=interaction_processor,
+            voice_loop=voice_loop,
+        )
+    else:
+        ui_renderer = SimpleRenderer(
+            state,
+            interaction_queue,
+            interaction_log_manager,
+            interaction_processor=interaction_processor,
+            voice_loop=voice_loop,
+        )
+    
+    ui_task = runtime_manager.register_task(asyncio.create_task(ui_renderer.start()))
+
     llama_manager = None
     if not skip_reasoning:
         llama_manager = LlamaModelManager(
@@ -262,30 +285,12 @@ async def main(stdscr=None, renderer_name="auto", renderer_reason="", dev_mode=F
         "audio_waveform": None,
         "override_response": "Hello! I'm online and ready.",
     })
-    await asyncio.sleep(0.1)
+    await asyncio.sleep(5.0)
 
     event_scheduler = EventScheduler(
         state, interaction_log_manager, index_manager, runtime_manager=runtime_manager
     )
-    if stdscr is not None:
-        from tui_renderer import TUIRenderer  # noqa: PLC0415
-
-        ui_renderer = TUIRenderer(
-            stdscr,
-            state,
-            interaction_queue,
-            interaction_log_manager,
-            interaction_processor=interaction_processor,
-            voice_loop=voice_loop,
-        )
-    else:
-        ui_renderer = SimpleRenderer(
-            state,
-            interaction_queue,
-            interaction_log_manager,
-            interaction_processor=interaction_processor,
-            voice_loop=voice_loop,
-        )
+    
     thought_generator = ThoughtGenerator(
         state, llama_manager, interaction_log_manager, event_scheduler,
         interaction_processor=interaction_processor
@@ -300,7 +305,6 @@ async def main(stdscr=None, renderer_name="auto", renderer_reason="", dev_mode=F
     # Debug Server (Hot Socket)
     debug_server = DebugServer(command_handler=ui_renderer.handle_command, state=state)
     
-    ui_task = runtime_manager.register_task(asyncio.create_task(ui_renderer.start()))
     background_tasks = [
         runtime_manager.register_task(asyncio.create_task(event_scheduler.start())),
         runtime_manager.register_task(asyncio.create_task(interaction_processor.start())),
