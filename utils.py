@@ -347,7 +347,8 @@ class PersonaPlexManager:
                 def patched_load_voice_prompt_embeddings(self, path: str):
                     self.voice_prompt = path
                     import torch
-                    state = torch.load(path, map_location='cpu')
+                    # Definitively load on CPU to avoid VRAM spikes during warmup
+                    state = torch.load(path, map_location=torch.device('cpu'))
                     self.voice_prompt_audio = None
                     self.voice_prompt_embeddings = state["embeddings"].to(self.lm_model.device)
                     self.voice_prompt_cache = state["cache"].to(self.lm_model.device)
@@ -524,6 +525,11 @@ class PersonaPlexManager:
 
                 moshi_weight = hf_hub_download(target_repo, target_filename)
                 
+                # Explicit cleanup before 14GB payload load
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+
                 if is_quantizing:
                     self._status("PersonaPlexManager: definitive CPU weight load (numpy intermediate)...")
                     from safetensors import safe_open
