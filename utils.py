@@ -452,10 +452,21 @@ class PersonaPlexManager:
 
         vram_before = get_vram()
         self._status("PersonaPlexManager: starting in-process model load...")
+        
+        quantize_type = getattr(_config, "PERSONAPLEX_QUANTIZE", "")
+        is_quantizing = (quantize_type and quantize_type not in ("none", "None"))
+
         with self._lock:
             from huggingface_hub import hf_hub_download
             
+            # If quantizing, isolate GPU completely during the heavy weight load
+            original_cuda_visible = os.environ.get("CUDA_VISIBLE_DEVICES")
             try:
+                if is_quantizing:
+                    os.environ["CUDA_VISIBLE_DEVICES"] = ""
+                    if hasattr(torch, "set_default_device"):
+                        torch.set_default_device("cpu")
+                
                 # 1) Load Mimi
                 start = time.perf_counter()
                 self._status("PersonaPlexManager: loading mimi...")
@@ -483,19 +494,14 @@ class PersonaPlexManager:
                 self._status("PersonaPlexManager: loading moshi lm...")
                 moshi_weight = hf_hub_download(self.repo, loaders.MOSHI_NAME)
                 
-                quantize_type = getattr(_config, "PERSONAPLEX_QUANTIZE", "")
-                is_quantizing = (quantize_type and quantize_type not in ("none", "None"))
-                
                 if is_quantizing:
-                    self._status("PersonaPlexManager: manual CPU weight load (bypassing CUDA)...")
-                    # Manual load to ensure we never touch CUDA during the 14GB payload load
+                    self._status("PersonaPlexManager: manual CPU weight load (GPU isolated)...")
                     from safetensors import safe_open
                     state_dict = {}
                     with safe_open(moshi_weight, framework="pt", device="cpu") as f:
                         for key in f.keys():
                             state_dict[key] = f.get_tensor(key)
                     
-                    # Create model on CPU
                     lm_kwargs = dict(loaders._lm_kwargs)
                     lm_kwargs["dep_q"] = 16
                     from moshi.models.lm import LMModel
@@ -503,10 +509,6 @@ class PersonaPlexManager:
                     self.lm.load_state_dict(state_dict, strict=False, assign=True)
                     del state_dict
                     gc.collect()
-                    
-                    from quantize import quantize_model_after_load
-                    self._status(f"PersonaPlexManager: applying {quantize_type} quantization (on CPU then moving to {self.device})...")
-                    self.lm = quantize_model_after_load(self.lm, quantize_type, device=self.device)
                 else:
                     self.lm = loaders.get_moshi_lm(moshi_weight, device=self.device, cpu_offload=self.cpu_offload)
                 
@@ -514,32 +516,46 @@ class PersonaPlexManager:
                 dur = time.perf_counter() - start
                 vram_now = get_vram()
                 self._status(f"PersonaPlexManager: moshi loaded in {dur:.1f}s (VRAM: {vram_now:.2f}GB, +{vram_now-vram_before:.2f}GB)")
+
+            finally:
+                if is_quantizing:
+                    if original_cuda_visible is not None:
+                        os.environ["CUDA_VISIBLE_DEVICES"] = original_cuda_visible
+                    else:
+                        os.environ.pop("CUDA_VISIBLE_DEVICES", None)
+                    if hasattr(torch, "set_default_device"):
+                        torch.set_default_device(self.device)
+
+            if is_quantizing:
+                from quantize import quantize_model_after_load
+                self._status(f"PersonaPlexManager: applying {quantize_type} quantization (moving to {self.device})...")
+                self.lm = quantize_model_after_load(self.lm, quantize_type, device=self.device)
                 
                 # Move Mimi to GPU now that LM is safely loaded/quantized
                 self.mimi.to(self.device)
                 self.other_mimi.to(self.device)
 
-                # Streaming forever setup
-                self.mimi.streaming_forever(1)
-                self.other_mimi.streaming_forever(1)
-                
-                # Warm generator setup
-                self.lm_gen = LMGen(
-                    self.lm,
-                    audio_silence_frame_cnt=int(0.5 * self.mimi.frame_rate),
-                    sample_rate=self.mimi.sample_rate,
-                    device=self.device,
-                    frame_rate=self.mimi.frame_rate,
-                    save_voice_prompt_embeddings=False,
-                    use_sampling=True,
-                    temp=0.7,
-                    temp_text=0.0,   # Greedy text
-                    top_k=50,
-                    top_k_text=1,    # Greedy text
-                )
-                self.lm_gen.streaming_forever(1)
-                
-                self._status("PersonaPlexManager: models and warm generator loaded and ready.")
+            # Streaming forever setup
+            self.mimi.streaming_forever(1)
+            self.other_mimi.streaming_forever(1)
+            
+            # Warm generator setup
+            self.lm_gen = LMGen(
+                self.lm,
+                audio_silence_frame_cnt=int(0.5 * self.mimi.frame_rate),
+                sample_rate=self.mimi.sample_rate,
+                device=self.device,
+                frame_rate=self.mimi.frame_rate,
+                save_voice_prompt_embeddings=False,
+                use_sampling=True,
+                temp=0.7,
+                temp_text=0.0,   # Greedy text
+                top_k=50,
+                top_k_text=1,    # Greedy text
+            )
+            self.lm_gen.streaming_forever(1)
+            
+            self._status("PersonaPlexManager: models and warm generator loaded and ready.")
                 
                 # Pre-warm voice prompt so the first inference skips the 26s setup.
                 try:
