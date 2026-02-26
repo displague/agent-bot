@@ -460,11 +460,12 @@ class PersonaPlexManager:
                 start = time.perf_counter()
                 self._status("PersonaPlexManager: loading mimi...")
                 mimi_weight = hf_hub_download(self.repo, loaders.MIMI_NAME)
-                self.mimi = loaders.get_mimi(mimi_weight, self.device)
-                self.other_mimi = loaders.get_mimi(mimi_weight, self.device)
+                # Load on CPU first to keep VRAM free for the large LM load
+                self.mimi = loaders.get_mimi(mimi_weight, "cpu")
+                self.other_mimi = loaders.get_mimi(mimi_weight, "cpu")
                 dur = time.perf_counter() - start
                 vram_now = get_vram()
-                self._status(f"PersonaPlexManager: mimi loaded in {dur:.1f}s (VRAM: {vram_now:.2f}GB, +{vram_now-vram_before:.2f}GB)")
+                self._status(f"PersonaPlexManager: mimi loaded in {dur:.1f}s (VRAM: {vram_now:.2f}GB, +{0:.2f}GB)")
                 vram_before = vram_now
                 
                 # 2) Load tokenizer
@@ -514,6 +515,10 @@ class PersonaPlexManager:
                 vram_now = get_vram()
                 self._status(f"PersonaPlexManager: moshi loaded in {dur:.1f}s (VRAM: {vram_now:.2f}GB, +{vram_now-vram_before:.2f}GB)")
                 
+                # Move Mimi to GPU now that LM is safely loaded/quantized
+                self.mimi.to(self.device)
+                self.other_mimi.to(self.device)
+
                 # Streaming forever setup
                 self.mimi.streaming_forever(1)
                 self.other_mimi.streaming_forever(1)
