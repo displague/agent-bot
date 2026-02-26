@@ -861,7 +861,21 @@ class TUIRenderer:
         lines.append(f"Voice diagnose: personaplex_python={py}")
         lines.append(f"Voice diagnose: python_exists={os.path.exists(py)}")
         
-        check_script = "import sys; results = []; try: import torch; results.append(f'torch={torch.__version__} cuda={torch.cuda.is_available()} cu_ver={getattr(torch.version, \"cuda\", \"N/A\")}'); except ImportError: results.append('torch=MISSING'); try: import moshi; results.append('moshi=OK'); except ImportError: results.append('moshi=MISSING'); print(' '.join(results))"
+        check_script = (
+            "results = []\n"
+            "try:\n"
+            "    import torch\n"
+            "    cu = getattr(torch.version, 'cuda', 'N/A')\n"
+            "    results.append(f'torch={torch.__version__} cuda={torch.cuda.is_available()} cu_ver={cu}')\n"
+            "except ImportError:\n"
+            "    results.append('torch=MISSING')\n"
+            "try:\n"
+            "    import moshi\n"
+            "    results.append('moshi=OK')\n"
+            "except ImportError:\n"
+            "    results.append('moshi=MISSING')\n"
+            "print(' '.join(results))\n"
+        )
         
         command = [py, "-c", check_script]
         try:

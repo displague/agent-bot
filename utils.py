@@ -503,8 +503,8 @@ class PersonaPlexManager:
                     use_sampling=True,
                     temp=0.8,
                     temp_text=0.7,
-                    top_k=1,
-                    top_k_text=1,
+                    top_k=250,       # MLX default; top_k=1 caused greedy decoding → always same output
+                    top_k_text=25,   # MLX default; top_k_text=1 caused repetitive text tokens
                 )
                 self.lm_gen.streaming_forever(1)
                 
