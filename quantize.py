@@ -67,12 +67,21 @@ def quantize_model_after_load(
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
 
-    # Rough size estimate
-    buffers = sum(b.numel() for b in model.buffers())
-    params = sum(p.numel() for p in model.parameters())
-    # bitsandbytes parameters don't report their true bit-depth in numel() accurately for size math,
-    # but this gives a rough upper bound.
-    size_gb = (buffers * 1 + params * 2) / (1024 ** 3)
+    # Accurate size estimate based on bits-per-parameter
+    total_bytes = 0
+    for name, module in model.named_modules():
+        if isinstance(module, _BNBLinear4bit):
+            total_bytes += (module.in_features * module.out_features * 0.5)
+        elif isinstance(module, (_BNBLinear8bit, _QuantizedLinear)):
+            total_bytes += (module.in_features * module.out_features * 1.0)
+        elif isinstance(module, nn.Linear):
+            total_bytes += (module.in_features * module.out_features * 2.0) # assume fp16/bf16
+            
+    # Add buffers (norm, embeddings, etc.)
+    for b in model.buffers():
+        total_bytes += b.numel() * 2 # assume 16-bit
+        
+    size_gb = total_bytes / (1024 ** 3)
     print(f"[quantize] Estimated model size after quantization: ~{size_gb:.1f} GB")
 
     return model
@@ -106,13 +115,11 @@ class _BNBLinear4bit(nn.Module):
     @property
     def weight(self) -> torch.Tensor:
         """Dequantize weights on-the-fly for direct access by multi_linear fused ops."""
-        # Use bnb's internal dequantization if on GPU, otherwise simple cast
-        if self.bnb_layer.weight.device.type == 'cuda':
-            return bnb.functional.dequantize_4bit(
-                self.bnb_layer.weight.data, 
-                self.bnb_layer.weight.quant_state
-            )
-        return self.bnb_layer.weight.data.to(torch.float32)
+        # Use bnb's internal dequantization — works on GPU and CPU (for recent versions)
+        return bnb.functional.dequantize_4bit(
+            self.bnb_layer.weight.data, 
+            self.bnb_layer.weight.quant_state
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.bnb_layer(x)
