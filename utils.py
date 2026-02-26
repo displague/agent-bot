@@ -499,12 +499,14 @@ class PersonaPlexManager:
                 moshi_weight = hf_hub_download(self.repo, loaders.MOSHI_NAME)
                 
                 if is_quantizing:
-                    self._status("PersonaPlexManager: manual CPU weight load (GPU isolated)...")
+                    self._status("PersonaPlexManager: definitive CPU weight load (numpy intermediate)...")
                     from safetensors import safe_open
                     state_dict = {}
-                    with safe_open(moshi_weight, framework="pt", device="cpu") as f:
+                    with safe_open(moshi_weight, framework="np", device="cpu") as f:
                         for key in f.keys():
-                            state_dict[key] = f.get_tensor(key)
+                            # Load as numpy array first, then convert to CPU tensor
+                            arr = f.get_tensor(key)
+                            state_dict[key] = torch.from_numpy(arr).to(torch.bfloat16)
                     
                     lm_kwargs = dict(loaders._lm_kwargs)
                     lm_kwargs["dep_q"] = 16
