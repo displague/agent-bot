@@ -23,7 +23,14 @@ class ThoughtGenerator:
     Generates autonomous thoughts periodically, using the FunctionalAgent for multi-phase processing.
     """
 
-    def __init__(self, state, llama_manager, interaction_log_manager, event_scheduler, interaction_processor=None):
+    def __init__(
+        self,
+        state,
+        llama_manager,
+        interaction_log_manager,
+        event_scheduler,
+        interaction_processor=None,
+    ):
         self.state = state
         self.llama_manager = llama_manager
         self.interaction_log_manager = interaction_log_manager
@@ -39,9 +46,15 @@ class ThoughtGenerator:
         self.logger.debug("Starting autonomous thought generation...")
         while not self._stop_event.is_set():
             current_hour = datetime.now().hour
-            is_sleep_time = (DAILY_SLEEP_START <= current_hour or current_hour < DAILY_SLEEP_END)
-            
-            if is_sleep_time and not self.state.get("manual_wake") and not config.NO_SLEEP:
+            is_sleep_time = (
+                DAILY_SLEEP_START <= current_hour or current_hour < DAILY_SLEEP_END
+            )
+
+            if (
+                is_sleep_time
+                and not self.state.get("manual_wake")
+                and not config.NO_SLEEP
+            ):
                 self.state["is_sleeping"] = True
                 await asyncio.sleep(random.uniform(5, 10))
             elif SKIP_DEEP_REASONING:
@@ -52,23 +65,30 @@ class ThoughtGenerator:
                 self.state["is_sleeping"] = False
                 self.logger.debug("Generating new autonomous thoughts")
                 await self.generate_thought()
-                await asyncio.sleep(max(THOUGHT_MIN_INTERVAL_SECONDS, random.uniform(1, 3)))
+                await asyncio.sleep(
+                    max(THOUGHT_MIN_INTERVAL_SECONDS, random.uniform(1, 3))
+                )
 
     async def generate_thought(self):
         """Generates a single thought."""
         async with self._semaphore:
             # Also synchronize with the main interaction processor to avoid GPU contention
             lock_ctx = (
-                self.interaction_processor._processing_lock 
-                if self.interaction_processor else asyncio.Lock()
+                self.interaction_processor._processing_lock
+                if self.interaction_processor
+                else asyncio.Lock()
             )
-            
+
             async with lock_ctx:
                 self.state["ongoing_thoughts"] += 1
-                thought_prompt = f"Autonomous thought at {datetime.now().strftime('%H:%M:%S')}"
+                thought_prompt = (
+                    f"Autonomous thought at {datetime.now().strftime('%H:%M:%S')}"
+                )
                 response = None
                 try:
-                    response = await self.functional_agent.handle_request(thought_prompt)
+                    response = await self.functional_agent.handle_request(
+                        thought_prompt
+                    )
                     self.state.setdefault("current_thoughts", []).append(response)
                     while len(self.state["current_thoughts"]) > 5:
                         self.state["current_thoughts"].pop(0)
@@ -78,7 +98,9 @@ class ThoughtGenerator:
                     self.logger.error(f"Error in generate_thought: {e}")
                     await asyncio.sleep(1)
                 finally:
-                    self.state["ongoing_thoughts"] = max(0, self.state["ongoing_thoughts"] - 1)
+                    self.state["ongoing_thoughts"] = max(
+                        0, self.state["ongoing_thoughts"] - 1
+                    )
 
     def request_stop(self):
         self._stop_event.set()

@@ -31,7 +31,13 @@ except Exception:  # pragma: no cover - optional dependency at runtime
     Llama = None
 
 try:
-    from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer, AutoProcessor, BitsAndBytesConfig
+    from transformers import (
+        AutoConfig,
+        AutoModelForCausalLM,
+        AutoTokenizer,
+        AutoProcessor,
+        BitsAndBytesConfig,
+    )
     import torch
 except Exception:  # pragma: no cover - optional dependency at runtime
     AutoConfig = None
@@ -143,7 +149,9 @@ class LlamaModelManager:
                 "huggingface_hub is required to resolve GGUF from HF cache. Install huggingface_hub."
             )
         self.logger.info(
-            "Resolving llama.cpp model from HF cache: repo=%s file=%s", repo_id, filename
+            "Resolving llama.cpp model from HF cache: repo=%s file=%s",
+            repo_id,
+            filename,
         )
         self._status(f"Resolving GGUF from HF cache: {repo_id}/{filename}")
         return hf_hub_download(repo_id=repo_id, filename=filename)
@@ -155,7 +163,10 @@ class LlamaModelManager:
         requested_ctx = int(os.getenv("AGENTBOT_LLAMA_N_CTX", "2048"))
         self._status(f"Loading llama.cpp backend (n_ctx={requested_ctx})")
         self.llm = Llama(
-            model_path=model_path, n_ctx=requested_ctx, n_gpu_layers=-1, n_threads=os.cpu_count()
+            model_path=model_path,
+            n_ctx=requested_ctx,
+            n_gpu_layers=-1,
+            n_threads=os.cpu_count(),
         )
         self.hf_model = None
         self.hf_tokenizer = None
@@ -177,10 +188,11 @@ class LlamaModelManager:
         repo_id = spec.get("repo_id")
         if not repo_id:
             raise RuntimeError("transformers model spec must define repo_id.")
-        
+
         import time
+
         start_total = time.perf_counter()
-        
+
         def get_vram():
             if torch is not None and torch.cuda.is_available():
                 return torch.cuda.memory_allocated() / (1024**3)
@@ -188,24 +200,32 @@ class LlamaModelManager:
 
         vram_before = get_vram()
         self.logger.info("Loading transformers model from HF cache: repo=%s", repo_id)
-        
+
         # 1) Tokenizer
         start = time.perf_counter()
         self._status(f"Loading tokenizer: {repo_id}")
-        self.hf_tokenizer = AutoTokenizer.from_pretrained(repo_id, trust_remote_code=True)
+        self.hf_tokenizer = AutoTokenizer.from_pretrained(
+            repo_id, trust_remote_code=True
+        )
         dur = time.perf_counter() - start
         vram_now = get_vram()
-        self._status(f"Tokenizer loaded in {dur:.1f}s (VRAM: {vram_now:.2f}GB, +{vram_now-vram_before:.2f}GB)")
+        self._status(
+            f"Tokenizer loaded in {dur:.1f}s (VRAM: {vram_now:.2f}GB, +{vram_now-vram_before:.2f}GB)"
+        )
         vram_before = vram_now
 
         # 2) Processor
         if AutoProcessor is not None:
             start = time.perf_counter()
             self._status(f"Loading processor: {repo_id}")
-            self.hf_processor = AutoProcessor.from_pretrained(repo_id, trust_remote_code=True)
+            self.hf_processor = AutoProcessor.from_pretrained(
+                repo_id, trust_remote_code=True
+            )
             dur = time.perf_counter() - start
             vram_now = get_vram()
-            self._status(f"Processor loaded in {dur:.1f}s (VRAM: {vram_now:.2f}GB, +{vram_now-vram_before:.2f}GB)")
+            self._status(
+                f"Processor loaded in {dur:.1f}s (VRAM: {vram_now:.2f}GB, +{vram_now-vram_before:.2f}GB)"
+            )
             vram_before = vram_now
 
         # 3) Config
@@ -216,13 +236,17 @@ class LlamaModelManager:
             config = AutoConfig.from_pretrained(repo_id, trust_remote_code=True)
             dur = time.perf_counter() - start
             vram_now = get_vram()
-            self._status(f"Config loaded in {dur:.1f}s (VRAM: {vram_now:.2f}GB, +{vram_now-vram_before:.2f}GB)")
+            self._status(
+                f"Config loaded in {dur:.1f}s (VRAM: {vram_now:.2f}GB, +{vram_now-vram_before:.2f}GB)"
+            )
             vram_before = vram_now
 
         # 4) Weights
         os.makedirs(MODEL_TRANSFORMERS_OFFLOAD_DIR, exist_ok=True)
-        self._status(f"Loading transformer weights: {repo_id} (first run may take a while)")
-        
+        self._status(
+            f"Loading transformer weights: {repo_id} (first run may take a while)"
+        )
+
         bnb_config = None
         if BitsAndBytesConfig is not None and PERSONAPLEX_DEVICE == "cuda":
             bnb_config = BitsAndBytesConfig(
@@ -237,7 +261,11 @@ class LlamaModelManager:
         self.hf_model = AutoModelForCausalLM.from_pretrained(
             repo_id,
             config=config,
-            torch_dtype=torch.bfloat16 if PERSONAPLEX_DEVICE == "cuda" and bnb_config is None else "auto",
+            torch_dtype=(
+                torch.bfloat16
+                if PERSONAPLEX_DEVICE == "cuda" and bnb_config is None
+                else "auto"
+            ),
             device_map="auto",
             quantization_config=bnb_config,
             offload_folder=MODEL_TRANSFORMERS_OFFLOAD_DIR,
@@ -247,12 +275,19 @@ class LlamaModelManager:
         )
         dur = time.perf_counter() - start
         vram_now = get_vram()
-        self._status(f"Weights loaded in {dur:.1f}s (VRAM: {vram_now:.2f}GB, +{vram_now-vram_before:.2f}GB)")
-        
+        self._status(
+            f"Weights loaded in {dur:.1f}s (VRAM: {vram_now:.2f}GB, +{vram_now-vram_before:.2f}GB)"
+        )
+
         self.llm = None
         self.backend = "transformers"
         total_dur = time.perf_counter() - start_total
-        self.logger.info("Active model set: alias=%s backend=%s total_load_time=%.1fs", spec["alias"], self.backend, total_dur)
+        self.logger.info(
+            "Active model set: alias=%s backend=%s total_load_time=%.1fs",
+            spec["alias"],
+            self.backend,
+            total_dur,
+        )
 
     def load_model(self, alias: Optional[str] = None) -> Dict[str, Any]:
         target_alias = self._resolve_alias(alias)
@@ -269,9 +304,7 @@ class LlamaModelManager:
                     f"Unsupported backend '{backend}' for alias '{target_alias}'."
                 )
             self.active_model_alias = target_alias
-            self._status(
-                f"Model ready: alias={target_alias} backend={self.backend}"
-            )
+            self._status(f"Model ready: alias={target_alias} backend={self.backend}")
             return self.get_model_info()
 
     def list_models(self) -> Dict[str, Dict[str, Any]]:
@@ -325,24 +358,24 @@ class LlamaModelManager:
             if self.backend == "transformers":
                 if self.hf_model is None or self.hf_tokenizer is None:
                     raise RuntimeError("Transformers model is not loaded.")
-                
+
                 # Convert context + current prompt into messages
                 raw_messages = []
                 for entry in self.llm_context:
                     if entry.startswith("Assistant: "):
                         role = "assistant"
-                        content = entry[len("Assistant: "):]
+                        content = entry[len("Assistant: ") :]
                     elif entry.startswith("User: "):
                         role = "user"
-                        content = entry[len("User: "):]
+                        content = entry[len("User: ") :]
                     else:
                         role = "user"
                         content = entry
                     raw_messages.append({"role": role, "content": content})
-                
+
                 # Add the current user prompt
                 raw_messages.append({"role": "user", "content": prompt})
-                
+
                 # Normalize messages: ensure alternating user/assistant and starts with user
                 messages = []
                 for m in raw_messages:
@@ -350,7 +383,7 @@ class LlamaModelManager:
                         if m["role"] == "user":
                             messages.append(m)
                         continue
-                    
+
                     if m["role"] == messages[-1]["role"]:
                         # Merge consecutive same-role messages
                         messages[-1]["content"] += "\n" + m["content"]
@@ -360,32 +393,37 @@ class LlamaModelManager:
                 templated_prompt = self.hf_tokenizer.apply_chat_template(
                     messages, tokenize=False, add_generation_prompt=True
                 )
-                
+
                 # Use processor if multi-modal data is present
-                if (audio is not None or image is not None) and self.hf_processor is not None:
-                    proc_kwargs = {
-                        "text": templated_prompt,
-                        "return_tensors": "pt"
-                    }
+                if (
+                    audio is not None or image is not None
+                ) and self.hf_processor is not None:
+                    proc_kwargs = {"text": templated_prompt, "return_tensors": "pt"}
                     if audio is not None:
                         proc_kwargs["audios"] = audio
                         proc_kwargs["sampling_rate"] = 16000
                     if image is not None:
                         proc_kwargs["images"] = image
-                        
+
                     model_inputs = self.hf_processor(**proc_kwargs)
                 else:
                     encoded = self.hf_tokenizer(templated_prompt, return_tensors="pt")
                     model_inputs = dict(encoded)
-                
+
                 target_device = getattr(self.hf_model, "device", None)
                 if target_device is not None:
                     model_inputs = {k: v.to(target_device) for k, v in encoded.items()}
-                
+
                 # Ensure floating point model inputs are in bfloat16 if on CUDA
                 if target_device is not None and "cuda" in str(target_device):
-                    model_inputs = {k: v.to(dtype=torch.bfloat16) if torch.is_floating_point(v) else v 
-                                   for k, v in model_inputs.items()}
+                    model_inputs = {
+                        k: (
+                            v.to(dtype=torch.bfloat16)
+                            if torch.is_floating_point(v)
+                            else v
+                        )
+                        for k, v in model_inputs.items()
+                    }
                     torch.cuda.empty_cache()
 
                 output_ids = self.hf_model.generate(
@@ -396,14 +434,16 @@ class LlamaModelManager:
                     repetition_penalty=1.2,
                     pad_token_id=self.hf_tokenizer.eos_token_id,
                 )
-                
+
                 # Retrieve the correct length for slicing
                 input_len = 0
                 if "input_ids" in model_inputs:
                     input_len = model_inputs["input_ids"].shape[-1]
-                elif "pixel_values" in model_inputs: # Vision-only fallback
-                    input_len = 0 # Usually image prompts replace or prepend differently
-                
+                elif "pixel_values" in model_inputs:  # Vision-only fallback
+                    input_len = (
+                        0  # Usually image prompts replace or prepend differently
+                    )
+
                 new_tokens = output_ids[0][input_len:]
                 return self.hf_tokenizer.decode(new_tokens, skip_special_tokens=True)
             raise RuntimeError("No active model backend is loaded.")
@@ -424,7 +464,9 @@ class LlamaModelManager:
             # Keep the tail of the prompt where latest instruction/context lives.
             ratio = 0.8
             if prompt_tokens > 0:
-                ratio = max(0.2, min(0.85, (target_ctx - reserve) / float(prompt_tokens)))
+                ratio = max(
+                    0.2, min(0.85, (target_ctx - reserve) / float(prompt_tokens))
+                )
             keep_chars = max(256, int(math.floor(len(text) * ratio)))
             text = text[-keep_chars:]
         # Final fallback: heavily truncate and force tiny generation budget.
@@ -439,7 +481,9 @@ class LlamaModelManager:
             if self.backend == "transformers":
                 if self.hf_tokenizer is None:
                     return len((text or "").split())
-                return len(self.hf_tokenizer.encode(text or "", add_special_tokens=False))
+                return len(
+                    self.hf_tokenizer.encode(text or "", add_special_tokens=False)
+                )
             return len((text or "").split())
 
     def update_context(self, new_entry):
@@ -503,21 +547,23 @@ Notes:"""
         """Inspects the last 'seconds' of audio for non-verbal context."""
         if self.voice_loop is None:
             return "Error: Voice loop not connected to model manager."
-        
+
         audio = self.voice_loop.get_recent_audio(seconds)
         if audio.size == 0:
             return "No audio captured in the buffer yet."
-        
+
         if return_raw:
             return audio
 
         from utils import extract_audio_features
+
         features = extract_audio_features(audio)
         return f"Audio Snippet ({seconds}s) Features: {features}"
 
     def fn_inspect_current_screen(self):
         """Captures the current screen for visual analysis."""
         from utils import capture_screen
+
         try:
             img = capture_screen()
             self.logger.info("Screen captured successfully.")
@@ -570,22 +616,37 @@ Otherwise, produce the {phase_name} text directly.
                 fname = call_data["name"]
                 args = call_data["arguments"]
                 function_result = self.call_function(fname, args)
-                
+
                 # If tool returns raw audio, re-invoke LLM with multi-modal data
                 if isinstance(function_result, np.ndarray):
-                    self.logger.info("Tool returned raw audio, re-invoking LLM with multi-modal context.")
+                    self.logger.info(
+                        "Tool returned raw audio, re-invoking LLM with multi-modal context."
+                    )
                     follow_up_prompt = f"I have retrieved the audio you requested. What can you hear in this {len(function_result)/16000:.1f}s snippet?"
                     return await loop.run_in_executor(
-                        self.llm_executor, self.llm_call, follow_up_prompt, 512, function_result, None
+                        self.llm_executor,
+                        self.llm_call,
+                        follow_up_prompt,
+                        512,
+                        function_result,
+                        None,
                     )
-                
+
                 # If tool returns image, re-invoke LLM
                 from PIL import Image as PILImage
+
                 if isinstance(function_result, PILImage.Image):
-                    self.logger.info("Tool returned image, re-invoking LLM with multi-modal context.")
+                    self.logger.info(
+                        "Tool returned image, re-invoking LLM with multi-modal context."
+                    )
                     follow_up_prompt = "I have captured the screen as you requested. What can you see in this image?"
                     return await loop.run_in_executor(
-                        self.llm_executor, self.llm_call, follow_up_prompt, 512, None, function_result
+                        self.llm_executor,
+                        self.llm_call,
+                        follow_up_prompt,
+                        512,
+                        None,
+                        function_result,
                     )
 
                 # Function calls are still part of internal state context for the next phase

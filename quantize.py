@@ -40,7 +40,9 @@ def quantize_model_after_load(
         raise RuntimeError("Quantization requires a CUDA-capable GPU.")
 
     if bnb is None:
-        print("[quantize] bitsandbytes not found. Falling back to native PyTorch quantization (slow/VRAM-heavy)…")
+        print(
+            "[quantize] bitsandbytes not found. Falling back to native PyTorch quantization (slow/VRAM-heavy)…"
+        )
     else:
         print(f"[quantize] Applying {quantize_type} quantization (bitsandbytes)…")
 
@@ -62,17 +64,19 @@ def quantize_model_after_load(
     total_bytes = 0
     for name, module in model.named_modules():
         if isinstance(module, _BNBLinear4bit):
-            total_bytes += (module.in_features * module.out_features * 0.5)
+            total_bytes += module.in_features * module.out_features * 0.5
         elif isinstance(module, (_BNBLinear8bit, _QuantizedLinear)):
-            total_bytes += (module.in_features * module.out_features * 1.0)
+            total_bytes += module.in_features * module.out_features * 1.0
         elif isinstance(module, nn.Linear):
-            total_bytes += (module.in_features * module.out_features * 2.0) # assume fp16/bf16
-            
+            total_bytes += (
+                module.in_features * module.out_features * 2.0
+            )  # assume fp16/bf16
+
     # Add buffers (norm, embeddings, etc.)
     for b in model.buffers():
-        total_bytes += b.numel() * 2 # assume 16-bit
-        
-    size_gb = total_bytes / (1024 ** 3)
+        total_bytes += b.numel() * 2  # assume 16-bit
+
+    size_gb = total_bytes / (1024**3)
     print(f"[quantize] Estimated model size after quantization: ~{size_gb:.1f} GB")
 
     return model
@@ -82,22 +86,25 @@ def quantize_model_after_load(
 # Internal helpers
 # ---------------------------------------------------------------------------
 
+
 class _BNBLinear4bit(nn.Module):
     """Linear layer using bitsandbytes 4-bit NF4 quantization."""
+
     def __init__(self, linear: nn.Linear):
         super().__init__()
         import bitsandbytes as bnb
+
         self.in_features = linear.in_features
         self.out_features = linear.out_features
-        
+
         # We initialize the bnb layer
         self.bnb_layer = bnb.nn.Linear4bit(
-            self.in_features, 
-            self.out_features, 
+            self.in_features,
+            self.out_features,
             bias=linear.bias is not None,
             compute_dtype=torch.bfloat16,
             quant_type="nf4",
-            double_quant=True
+            double_quant=True,
         )
         # Load weights into the bnb layer
         self.bnb_layer.weight.data.copy_(linear.weight.data)
@@ -108,10 +115,10 @@ class _BNBLinear4bit(nn.Module):
     def weight(self) -> torch.Tensor:
         """Dequantize weights on-the-fly for direct access by multi_linear fused ops."""
         import bitsandbytes as bnb
+
         # Use bnb's internal dequantization — works on GPU and CPU (for recent versions)
         return bnb.functional.dequantize_4bit(
-            self.bnb_layer.weight.data, 
-            self.bnb_layer.weight.quant_state
+            self.bnb_layer.weight.data, self.bnb_layer.weight.quant_state
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -120,17 +127,19 @@ class _BNBLinear4bit(nn.Module):
 
 class _BNBLinear8bit(nn.Module):
     """Linear layer using bitsandbytes 8-bit quantization."""
+
     def __init__(self, linear: nn.Linear):
         super().__init__()
         import bitsandbytes as bnb
+
         self.in_features = linear.in_features
         self.out_features = linear.out_features
-        
+
         self.bnb_layer = bnb.nn.Linear8bitLt(
-            self.in_features, 
-            self.out_features, 
+            self.in_features,
+            self.out_features,
             bias=linear.bias is not None,
-            has_fp16_weights=False
+            has_fp16_weights=False,
         )
         self.bnb_layer.weight.data.copy_(linear.weight.data)
         if linear.bias is not None:
@@ -139,8 +148,9 @@ class _BNBLinear8bit(nn.Module):
     @property
     def weight(self) -> torch.Tensor:
         import bitsandbytes as bnb
+
         # 8-bit dequantization logic
-        if self.bnb_layer.weight.device.type == 'cuda':
+        if self.bnb_layer.weight.device.type == "cuda":
             # bitsandbytes 8bit doesn't have a simple functional dequantize like 4bit,
             # but we can get the float weight via the .CB property or similar if needed.
             # For now, cast should work for compatibility checks.
@@ -153,17 +163,25 @@ class _BNBLinear8bit(nn.Module):
 
 class _QuantizedLinear(nn.Module):
     """Fallback native PyTorch linear layer with per-channel int8 weights."""
-    def __init__(self, in_features: int, out_features: int, bias: bool = True,
-                 quantize_type: str = "8bit"):
+
+    def __init__(
+        self,
+        in_features: int,
+        out_features: int,
+        bias: bool = True,
+        quantize_type: str = "8bit",
+    ):
         super().__init__()
         self.in_features = in_features
         self.out_features = out_features
         self.quantize_type = quantize_type
 
-        self.register_buffer("weight_quantized",
-                             torch.zeros(out_features, in_features, dtype=torch.int8))
-        self.register_buffer("weight_scale",
-                             torch.zeros(out_features, dtype=torch.float16))
+        self.register_buffer(
+            "weight_quantized", torch.zeros(out_features, in_features, dtype=torch.int8)
+        )
+        self.register_buffer(
+            "weight_scale", torch.zeros(out_features, dtype=torch.float16)
+        )
         if bias:
             self.bias = nn.Parameter(torch.zeros(out_features, dtype=torch.float16))
         else:
@@ -178,9 +196,15 @@ class _QuantizedLinear(nn.Module):
         return w
 
     @classmethod
-    def from_linear(cls, linear: nn.Linear, quantize_type: str = "8bit") -> "_QuantizedLinear":
-        q = cls(linear.in_features, linear.out_features,
-                bias=linear.bias is not None, quantize_type=quantize_type)
+    def from_linear(
+        cls, linear: nn.Linear, quantize_type: str = "8bit"
+    ) -> "_QuantizedLinear":
+        q = cls(
+            linear.in_features,
+            linear.out_features,
+            bias=linear.bias is not None,
+            quantize_type=quantize_type,
+        )
 
         weight = linear.weight.data.float()
         weight_max = weight.abs().max(dim=1, keepdim=True)[0].clamp(min=1e-8)
@@ -206,8 +230,15 @@ class _QuantizedLinear(nn.Module):
 # Layers whose weights are accessed directly by fused ops or embedding look-ups —
 # replacing them with QuantizedLinear would break the model.
 _SKIP_PATTERNS = [
-    "embed", "emb", "lm_head", "out_proj", "output",
-    "norm", "gating", "linear_in", "linear_out",
+    "embed",
+    "emb",
+    "lm_head",
+    "out_proj",
+    "output",
+    "norm",
+    "gating",
+    "linear_in",
+    "linear_out",
 ]
 _MIN_LAYER_SIZE = 1024  # don't bother quantizing tiny layers
 

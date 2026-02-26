@@ -87,8 +87,10 @@ class SimpleRenderer:
     async def _pump_logs(self):
         while not self._stop:
             try:
-                entries, next_offset = await self.interaction_log_manager.get_entries_since(
-                    self._last_log_offset
+                entries, next_offset = (
+                    await self.interaction_log_manager.get_entries_since(
+                        self._last_log_offset
+                    )
                 )
                 self._last_log_offset = next_offset
                 for entry in entries:
@@ -120,7 +122,9 @@ class SimpleRenderer:
                 "/set-persona <text>, /voice-optimize <mode>, /logic-reload, /wake, /sleep, /quit, /force-quit"
             )
             print("Ctrl+D (EOF) also exits in simple mode.")
-            print(f"Voice hotkey is available in curses mode via {VOICE_CAPTURE_KEY_LABEL}.")
+            print(
+                f"Voice hotkey is available in curses mode via {VOICE_CAPTURE_KEY_LABEL}."
+            )
             return
         if cmd == "/model" or cmd.startswith("/model "):
             if model_manager is None:
@@ -159,7 +163,7 @@ class SimpleRenderer:
             if model_manager is None:
                 print("LLM status: DISABLED (deep reasoning bypassed).")
                 return
-                
+
             info = model_manager.get_model_info() if model_manager is not None else {}
             llm_busy = model_manager.is_busy() if model_manager is not None else False
             elapsed = ""
@@ -233,7 +237,7 @@ class SimpleRenderer:
             active = self._voice_loop.is_running
             p_manager = getattr(self._voice_loop, "personaplex_manager", None)
             p_status = p_manager.get_status() if p_manager else {}
-            
+
             msg = (
                 f"Voice loop: {'running' if active else 'stopped'} "
                 f"mode={self.state.get('voice_mode')} "
@@ -248,6 +252,7 @@ class SimpleRenderer:
             return
         if cmd == "/voice-test-tone":
             from utils import play_test_tone
+
             print("Playing 1s test tone (440Hz)...")
             try:
                 await asyncio.to_thread(play_test_tone)
@@ -258,6 +263,7 @@ class SimpleRenderer:
         if cmd == "/voice-devices":
             try:
                 import sounddevice as sd
+
                 print(sd.query_devices())
             except Exception as e:
                 print(f"Failed to list audio devices: {e}")
@@ -267,22 +273,27 @@ class SimpleRenderer:
             import functional_agent
             import interaction_processor
             import utils
+
             try:
                 print("Hot-reloading logic modules...")
                 if self.interaction_processor:
                     self.interaction_processor.request_stop()
-                
+
                 importlib.reload(utils)
                 importlib.reload(functional_agent)
                 importlib.reload(interaction_processor)
-                
+
                 from interaction_processor import InteractionProcessor
                 from functional_agent import FunctionalAgent
-                
-                p_manager = getattr(self.interaction_processor, "personaplex_manager", None)
-                llama_manager = getattr(self.interaction_processor, "llama_manager", None)
+
+                p_manager = getattr(
+                    self.interaction_processor, "personaplex_manager", None
+                )
+                llama_manager = getattr(
+                    self.interaction_processor, "llama_manager", None
+                )
                 idx_manager = getattr(self.interaction_processor, "index_manager", None)
-                
+
                 new_processor = InteractionProcessor(
                     self.interaction_queue,
                     self.state,
@@ -290,11 +301,13 @@ class SimpleRenderer:
                     self.interaction_log_manager,
                     idx_manager,
                     voice_loop=self._voice_loop,
-                    personaplex_manager=p_manager
+                    personaplex_manager=p_manager,
                 )
-                new_processor.functional_agent = FunctionalAgent(llama_manager, state=self.state)
+                new_processor.functional_agent = FunctionalAgent(
+                    llama_manager, state=self.state
+                )
                 self.interaction_processor = new_processor
-                
+
                 asyncio.create_task(new_processor.start())
                 print("Logic and Utils modules reloaded and processor restarted.")
             except Exception as e:
@@ -309,6 +322,7 @@ class SimpleRenderer:
                 try:
                     dev_id = int(parts[2])
                     from utils import set_audio_devices
+
                     if target == "in":
                         set_audio_devices(input_id=dev_id)
                     elif target == "out":
@@ -322,20 +336,29 @@ class SimpleRenderer:
             if not text:
                 return
             print(f"Injecting voice response: {text}")
-            self.interaction_queue.put_nowait({"input": "[Direct Injection]", "audio_waveform": None, "override_response": text})
+            self.interaction_queue.put_nowait(
+                {
+                    "input": "[Direct Injection]",
+                    "audio_waveform": None,
+                    "override_response": text,
+                }
+            )
             return
         if cmd.startswith("/voice-hear "):
             text = raw[12:].strip()
             if not text:
                 return
             print(f"Injecting heard speech: {text}")
-            pm = (getattr(self.interaction_processor, "personaplex_manager", None)
-                  or getattr(self._voice_loop, "personaplex_manager", None))
+            pm = getattr(
+                self.interaction_processor, "personaplex_manager", None
+            ) or getattr(self._voice_loop, "personaplex_manager", None)
             vl = self._voice_loop
             if pm and vl:
+
                 async def _do_hear():
                     stream = pm.hear_stream(text, pm._primed_for or "")
                     await vl.say_stream(stream)
+
                 asyncio.create_task(_do_hear())
             else:
                 print("/voice-hear requires PersonaPlex + VoiceLoop")
@@ -346,13 +369,18 @@ class SimpleRenderer:
                 print("/voice-hear-file requires a file path")
                 return
             print(f"Injecting audio file: {path}")
-            pm = (getattr(self.interaction_processor, "personaplex_manager", None)
-                  or getattr(self._voice_loop, "personaplex_manager", None))
+            pm = getattr(
+                self.interaction_processor, "personaplex_manager", None
+            ) or getattr(self._voice_loop, "personaplex_manager", None)
             vl = self._voice_loop
             if pm and vl:
+
                 async def _do_hear_file():
-                    stream = pm.hear_stream("", pm._primed_for or "", user_wav_path=path)
+                    stream = pm.hear_stream(
+                        "", pm._primed_for or "", user_wav_path=path
+                    )
                     await vl.say_stream(stream)
+
                 asyncio.create_task(_do_hear_file())
             else:
                 print("/voice-hear-file requires PersonaPlex + VoiceLoop")
@@ -362,17 +390,23 @@ class SimpleRenderer:
             if not new_persona:
                 return
             import config
+
             config.PERSONAPLEX_TEXT_PROMPT = new_persona
             print(f"Persona updated: {new_persona[:50]}...")
             return
         if cmd.startswith("/voice-optimize "):
             mode = raw[16:].strip().lower()
             if mode not in ["auto", "eager", "compile", "graphs"]:
-                print(f"Invalid optimization mode: {mode}. Use auto, eager, compile, or graphs.")
+                print(
+                    f"Invalid optimization mode: {mode}. Use auto, eager, compile, or graphs."
+                )
             else:
                 import config
+
                 config.PERSONAPLEX_OPTIMIZE = mode
-                print(f"Optimization strategy updated to: {mode}. (Applied on next inference)")
+                print(
+                    f"Optimization strategy updated to: {mode}. (Applied on next inference)"
+                )
             return
         if cmd == "/voice-diagnose":
             for line in self._diagnose_voice_runtime():
@@ -392,7 +426,14 @@ class SimpleRenderer:
             print(msg)
             await self.interaction_log_manager.append(msg)
             return
-        if cmd not in {"/model", "/llm-status", "/llm-diagnose", "/smoke", "/smoke-all", "/force-quit"}:
+        if cmd not in {
+            "/model",
+            "/llm-status",
+            "/llm-diagnose",
+            "/smoke",
+            "/smoke-all",
+            "/force-quit",
+        }:
             print(f"Unknown command: {command}. Try /help")
 
     def _diagnose_voice_runtime(self):
@@ -400,7 +441,7 @@ class SimpleRenderer:
         py = _resolve_personaplex_python()
         lines.append(f"Voice diagnose: personaplex_python={py}")
         lines.append(f"Voice diagnose: python_exists={os.path.exists(py)}")
-        
+
         check_script = (
             "results = []\n"
             "try:\n"
@@ -416,7 +457,7 @@ class SimpleRenderer:
             "    results.append('moshi=MISSING')\n"
             "print(' '.join(results))\n"
         )
-        
+
         command = [py, "-c", check_script]
         try:
             result = subprocess.run(
@@ -429,9 +470,13 @@ class SimpleRenderer:
             if result.returncode == 0:
                 lines.append(f"Voice diagnose: {result.stdout.strip()}")
             else:
-                lines.append(f"Voice diagnose: torch check failed rc={result.returncode}")
+                lines.append(
+                    f"Voice diagnose: torch check failed rc={result.returncode}"
+                )
                 if result.stderr.strip():
-                    lines.append(f"Voice diagnose stderr: {result.stderr.strip()[:120]}")
+                    lines.append(
+                        f"Voice diagnose stderr: {result.stderr.strip()[:120]}"
+                    )
         except Exception as e:
             lines.append(f"Voice diagnose: failed to run torch check: {str(e)[:120]}")
         return lines

@@ -119,7 +119,9 @@ class TUIRenderer:
         finally:
             await self._voice_loop.stop()
 
-    async def _set_voice_state(self, *, server=None, session=None, activity=None, event=None):
+    async def _set_voice_state(
+        self, *, server=None, session=None, activity=None, event=None
+    ):
         if server is not None:
             self.state["voice_server_state"] = server
         if session is not None:
@@ -168,7 +170,9 @@ class TUIRenderer:
         max_y, max_x = self.stdscr.getmaxyx()
         sleep_status = "SLEEPING" if self.state["is_sleeping"] else "ACTIVE"
         listening_status = " LISTENING" if self.state.get("is_listening", False) else ""
-        processing_status = " PROCESSING" if self.state.get("is_processing", False) else ""
+        processing_status = (
+            " PROCESSING" if self.state.get("is_processing", False) else ""
+        )
         voice_mode = self.state.get("voice_mode", "unknown")
         voice_server_state = self.state.get("voice_server_state", "unknown")
         voice_session_state = self.state.get("voice_session_state", "unknown")
@@ -214,7 +218,7 @@ class TUIRenderer:
         """Renders the main screen with correct scrolling logic."""
         max_y, max_x = self.stdscr.getmaxyx()
         current_y = 1
-        
+
         # Room for thought lines
         current_thoughts = self.state.get("current_thoughts", [])
         for thought in current_thoughts:
@@ -224,7 +228,7 @@ class TUIRenderer:
                     break
                 self._safe_addstr(current_y, 0, line)
                 current_y += 1
-        
+
         # Remaining room for interaction log
         log_height = max_y - current_y - 3
         if log_height <= 0:
@@ -235,7 +239,7 @@ class TUIRenderer:
         display_log = await self.interaction_log_manager.get_display_log(
             max_items=log_height + 50, scroll_offset=self.scroll_offset
         )
-        
+
         # We render from bottom to top to fill the screen correctly
         rendered_lines = []
         for interaction in reversed(display_log):
@@ -246,7 +250,7 @@ class TUIRenderer:
                     break
             if len(rendered_lines) >= log_height:
                 break
-        
+
         for line in rendered_lines:
             self._safe_addstr(current_y, 0, line)
             current_y += 1
@@ -255,17 +259,17 @@ class TUIRenderer:
         """Renders the debug screen with enhanced telemetry."""
         max_y, max_x = self.stdscr.getmaxyx()
         current_y = 1
-        
+
         # Telemetry Summary
         vram = self.state.get("vram_gb", 0.0)
         inf_ms = self.state.get("inference_ms", 0.0)
         recent_toks = self.state.get("recent_tokens", "")
-        
+
         debug_lines = [
             f"Debug | Loading: {self.state.get('loading_stage', 'Unknown')}",
             f"Debug | Phase: {self.state.get('processing_phase', 'idle')} | VRAM: {vram:.2f} GB | Inf: {inf_ms:.1f} ms/frame",
             f"Debug | Voice: {self.state.get('voice_mode')}/{self.state.get('voice_server_state')}/{self.state.get('voice_activity_state')}",
-            f"Debug | Tokens: {recent_toks[-max_x+10:]}", # Show last visible segment
+            f"Debug | Tokens: {recent_toks[-max_x+10:]}",  # Show last visible segment
             f"Debug | Last Status: {self.state.get('last_processing_status', '')} | Error: {self.state.get('last_processing_error', '')}",
         ]
         for item in debug_lines:
@@ -273,12 +277,12 @@ class TUIRenderer:
             current_y += 1
             if current_y >= max_y - 3:
                 break
-        
+
         # Room for debug log entries
         max_log_lines = max_y - current_y - 3
         if max_log_lines <= 0:
             return
-            
+
         display_log = self.debug_log[
             -(max_log_lines + self.scroll_offset) : (
                 -self.scroll_offset if self.scroll_offset > 0 else None
@@ -297,13 +301,13 @@ class TUIRenderer:
         max_y, max_x = self.stdscr.getmaxyx()
         # Header "Input: " takes 7 chars
         max_chars = max(0, max_x - 8)
-        
+
         # Determine sliding window for long input
         start_char = 0
         if self.cursor_pos >= max_chars:
             start_char = self.cursor_pos - max_chars + 1
-            
-        visible_text = self.input_buffer[start_char:start_char + max_chars]
+
+        visible_text = self.input_buffer[start_char : start_char + max_chars]
         self._safe_addstr(max_y - 2, 0, "Input: " + visible_text)
         try:
             self.stdscr.clrtoeol()
@@ -327,7 +331,7 @@ class TUIRenderer:
         key = self.stdscr.getch()
         if key == -1:
             return
-        
+
         max_y, max_x = self.stdscr.getmaxyx()
 
         if key == 27:  # Esc key
@@ -335,11 +339,17 @@ class TUIRenderer:
             self.scroll_offset = 0
         elif key in (curses.KEY_BACKSPACE, 127, 8):  # Backspace variants
             if self.cursor_pos > 0:
-                self.input_buffer = self.input_buffer[:self.cursor_pos - 1] + self.input_buffer[self.cursor_pos:]
+                self.input_buffer = (
+                    self.input_buffer[: self.cursor_pos - 1]
+                    + self.input_buffer[self.cursor_pos :]
+                )
                 self.cursor_pos -= 1
         elif key == curses.KEY_DC:  # Delete key
             if self.cursor_pos < len(self.input_buffer):
-                self.input_buffer = self.input_buffer[:self.cursor_pos] + self.input_buffer[self.cursor_pos + 1:]
+                self.input_buffer = (
+                    self.input_buffer[: self.cursor_pos]
+                    + self.input_buffer[self.cursor_pos + 1 :]
+                )
         elif key == curses.KEY_LEFT:
             self.cursor_pos = max(0, self.cursor_pos - 1)
         elif key == curses.KEY_RIGHT:
@@ -359,7 +369,7 @@ class TUIRenderer:
                 if not self.input_history or self.input_history[-1] != cmd_text:
                     self.input_history.append(cmd_text)
                 self.history_index = -1
-                
+
                 normalized = cmd_text.lower()
                 if normalized in {"quit", "exit"}:
                     await self.handle_command("/quit")
@@ -408,10 +418,16 @@ class TUIRenderer:
         elif key == curses.KEY_NPAGE:  # Page Down
             scroll_by = max_y - 5
             self.scroll_offset = max(0, self.scroll_offset - scroll_by)
-        elif key == 9 and self.input_buffer.startswith("/"):  # Tab for command autocomplete
+        elif key == 9 and self.input_buffer.startswith(
+            "/"
+        ):  # Tab for command autocomplete
             self.autocomplete_command()
         elif 32 <= key <= 126:  # Printable characters
-            self.input_buffer = self.input_buffer[:self.cursor_pos] + chr(key) + self.input_buffer[self.cursor_pos:]
+            self.input_buffer = (
+                self.input_buffer[: self.cursor_pos]
+                + chr(key)
+                + self.input_buffer[self.cursor_pos :]
+            )
             self.cursor_pos += 1
 
         self.render_input_line()
@@ -517,8 +533,10 @@ class TUIRenderer:
                 await self.interaction_log_manager.append(msg)
                 self.show_footer_message(msg)
                 return
-                
-            model_info = model_manager.get_model_info() if model_manager is not None else {}
+
+            model_info = (
+                model_manager.get_model_info() if model_manager is not None else {}
+            )
             llm_busy = model_manager.is_busy() if model_manager is not None else False
             elapsed = ""
             started_at = self.state.get("last_processing_started_at")
@@ -567,7 +585,7 @@ class TUIRenderer:
             active = self._voice_loop.is_running
             p_manager = getattr(self._voice_loop, "personaplex_manager", None)
             p_status = p_manager.get_status() if p_manager else {}
-            
+
             msg = (
                 f"Voice loop: {'running' if active else 'stopped'} "
                 f"mode={self.state.get('voice_mode')} "
@@ -587,6 +605,7 @@ class TUIRenderer:
             return
         if cmd == "/voice-test-tone":
             from utils import play_test_tone
+
             msg = "Playing 1s test tone (440Hz)..."
             await self.interaction_log_manager.append(msg)
             self.show_footer_message(msg)
@@ -601,8 +620,9 @@ class TUIRenderer:
         if cmd == "/voice-devices":
             try:
                 import sounddevice as sd
+
                 devices = str(sd.query_devices())
-                for line in devices.split('\n'):
+                for line in devices.split("\n"):
                     await self.interaction_log_manager.append(f"Audio Device: {line}")
                 self.show_footer_message("Audio devices listed in log.")
             except Exception as e:
@@ -615,31 +635,36 @@ class TUIRenderer:
             import functional_agent
             import interaction_processor
             import utils
+
             try:
                 msg = "Hot-reloading logic modules..."
                 await self.interaction_log_manager.append(msg)
                 self.show_footer_message(msg)
-                
+
                 # 1. Stop current processor if it exists
                 if self.interaction_processor:
                     self.interaction_processor.request_stop()
                     # We can't easily await the task here without a reference to it,
                     # but request_stop will make it exit its loop shortly.
-                
+
                 # 2. Reload modules
                 importlib.reload(utils)
                 importlib.reload(functional_agent)
                 importlib.reload(interaction_processor)
-                
+
                 # 3. Re-instantiate
                 from interaction_processor import InteractionProcessor
                 from functional_agent import FunctionalAgent
-                
+
                 # Get the manager from the old processor
-                p_manager = getattr(self.interaction_processor, "personaplex_manager", None)
-                llama_manager = getattr(self.interaction_processor, "llama_manager", None)
+                p_manager = getattr(
+                    self.interaction_processor, "personaplex_manager", None
+                )
+                llama_manager = getattr(
+                    self.interaction_processor, "llama_manager", None
+                )
                 idx_manager = getattr(self.interaction_processor, "index_manager", None)
-                
+
                 new_processor = InteractionProcessor(
                     self.interaction_queue,
                     self.state,
@@ -647,15 +672,17 @@ class TUIRenderer:
                     self.interaction_log_manager,
                     idx_manager,
                     voice_loop=self.voice_loop,
-                    personaplex_manager=p_manager
+                    personaplex_manager=p_manager,
                 )
                 # Re-bind components
-                new_processor.functional_agent = FunctionalAgent(llama_manager, state=self.state)
+                new_processor.functional_agent = FunctionalAgent(
+                    llama_manager, state=self.state
+                )
                 self.interaction_processor = new_processor
-                
+
                 # 4. Start the new processor task
                 asyncio.create_task(new_processor.start())
-                
+
                 msg = "Logic and Utils modules reloaded and processor restarted."
             except Exception as e:
                 msg = f"Logic reload failed: {e}"
@@ -672,6 +699,7 @@ class TUIRenderer:
                 try:
                     dev_id = int(parts[2])
                     from utils import set_audio_devices
+
                     if target == "in":
                         set_audio_devices(input_id=dev_id)
                     elif target == "out":
@@ -690,7 +718,13 @@ class TUIRenderer:
             await self.interaction_log_manager.append(msg)
             self.show_footer_message(msg)
             # Use InteractionProcessor to handle the injection
-            self.interaction_queue.put_nowait({"input": "[Direct Injection]", "audio_waveform": None, "override_response": text})
+            self.interaction_queue.put_nowait(
+                {
+                    "input": "[Direct Injection]",
+                    "audio_waveform": None,
+                    "override_response": text,
+                }
+            )
             return
         if cmd.startswith("/voice-hear "):
             text = raw[12:].strip()
@@ -699,13 +733,16 @@ class TUIRenderer:
             msg = f"Injecting heard speech: {text}"
             await self.interaction_log_manager.append(msg)
             self.show_footer_message(msg)
-            pm = (getattr(self.interaction_processor, "personaplex_manager", None)
-                  or getattr(self._voice_loop, "personaplex_manager", None))
+            pm = getattr(
+                self.interaction_processor, "personaplex_manager", None
+            ) or getattr(self._voice_loop, "personaplex_manager", None)
             vl = self._voice_loop
             if pm and vl:
+
                 async def _do_hear():
                     stream = pm.hear_stream(text, pm._primed_for or "")
                     await vl.say_stream(stream)
+
                 asyncio.create_task(_do_hear())
             else:
                 self.show_footer_message("/voice-hear requires PersonaPlex + VoiceLoop")
@@ -718,22 +755,30 @@ class TUIRenderer:
             msg = f"Injecting audio file: {path}"
             await self.interaction_log_manager.append(msg)
             self.show_footer_message(msg)
-            pm = (getattr(self.interaction_processor, "personaplex_manager", None)
-                  or getattr(self._voice_loop, "personaplex_manager", None))
+            pm = getattr(
+                self.interaction_processor, "personaplex_manager", None
+            ) or getattr(self._voice_loop, "personaplex_manager", None)
             vl = self._voice_loop
             if pm and vl:
+
                 async def _do_hear_file():
-                    stream = pm.hear_stream("", pm._primed_for or "", user_wav_path=path)
+                    stream = pm.hear_stream(
+                        "", pm._primed_for or "", user_wav_path=path
+                    )
                     await vl.say_stream(stream)
+
                 asyncio.create_task(_do_hear_file())
             else:
-                self.show_footer_message("/voice-hear-file requires PersonaPlex + VoiceLoop")
+                self.show_footer_message(
+                    "/voice-hear-file requires PersonaPlex + VoiceLoop"
+                )
             return
         if cmd.startswith("/set-persona "):
             new_persona = raw[13:].strip()
             if not new_persona:
                 return
             import config
+
             config.PERSONAPLEX_TEXT_PROMPT = new_persona
             msg = f"Persona updated: {new_persona[:50]}..."
             await self.interaction_log_manager.append(msg)
@@ -745,6 +790,7 @@ class TUIRenderer:
                 msg = f"Invalid optimization mode: {mode}. Use auto, eager, compile, or graphs."
             else:
                 import config
+
                 config.PERSONAPLEX_OPTIMIZE = mode
                 msg = f"Optimization strategy updated to: {mode}. (Applied on next inference)"
             await self.interaction_log_manager.append(msg)
@@ -857,7 +903,7 @@ class TUIRenderer:
         py = _resolve_personaplex_python()
         lines.append(f"Voice diagnose: personaplex_python={py}")
         lines.append(f"Voice diagnose: python_exists={os.path.exists(py)}")
-        
+
         check_script = (
             "results = []\n"
             "try:\n"
@@ -873,7 +919,7 @@ class TUIRenderer:
             "    results.append('moshi=MISSING')\n"
             "print(' '.join(results))\n"
         )
-        
+
         command = [py, "-c", check_script]
         try:
             result = subprocess.run(
@@ -886,9 +932,13 @@ class TUIRenderer:
             if result.returncode == 0:
                 lines.append(f"Voice diagnose: {result.stdout.strip()}")
             else:
-                lines.append(f"Voice diagnose: torch check failed rc={result.returncode}")
+                lines.append(
+                    f"Voice diagnose: torch check failed rc={result.returncode}"
+                )
                 if result.stderr.strip():
-                    lines.append(f"Voice diagnose stderr: {result.stderr.strip()[:120]}")
+                    lines.append(
+                        f"Voice diagnose stderr: {result.stderr.strip()[:120]}"
+                    )
         except Exception as e:
             lines.append(f"Voice diagnose: failed to run torch check: {str(e)[:120]}")
         return lines
