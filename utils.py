@@ -695,9 +695,11 @@ class PersonaPlexManager:
                     self.lm, quantize_type, device=self.device
                 )
 
-                # Move Mimi to GPU now that LM is safely loaded/quantized
-                self.mimi.to(self.device)
-                self.other_mimi.to(self.device)
+            # Move Mimi to GPU now that LM is safely loaded/quantized.
+            # This must happen outside the is_quantizing block because Mimi is
+            # always loaded on CPU initially.
+            self.mimi.to(self.device)
+            self.other_mimi.to(self.device)
 
             # Streaming forever setup
             self.mimi.streaming_forever(1)
