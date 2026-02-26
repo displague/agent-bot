@@ -96,6 +96,15 @@ class _QuantizedLinear(nn.Module):
         else:
             self.register_parameter("bias", None)
 
+    @property
+    def weight(self) -> torch.Tensor:
+        """Dequantize weights on-the-fly for compatibility with direct .weight access."""
+        w = self.weight_quantized.float() * self.weight_scale.unsqueeze(1).float()
+        # Ensure we return the same dtype as bias (usually float16/bfloat16)
+        if self.bias is not None:
+            w = w.to(self.bias.dtype)
+        return w
+
     @classmethod
     def from_linear(cls, linear: nn.Linear, quantize_type: str = "8bit") -> "_QuantizedLinear":
         q = cls(linear.in_features, linear.out_features,
@@ -132,8 +141,9 @@ class _QuantizedLinear(nn.Module):
 # replacing them with QuantizedLinear would break the model.
 _SKIP_PATTERNS = [
     "embed", "emb", "lm_head", "out_proj", "output",
-    "norm", "gating", "linear_in", "linear_out",
+    "norm", "gating",
 ]
+# Note: "out_proj" restored to skip list. "linear_in" and "linear_out" remain candidates.
 _MIN_LAYER_SIZE = 1024  # don't bother quantizing tiny layers
 
 
