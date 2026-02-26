@@ -270,10 +270,16 @@ class VoiceLoop:
                             self._streaming_session.start
                         )
                     
+                    # Capture local ref — say_audio() may set self._streaming_session = None
+                    # concurrently, causing AttributeError if we use self._streaming_session.step
+                    session = self._streaming_session
+                    if session is None:
+                        continue
+
                     # Use the dedicated sequential executor for every step
                     out_audio, out_text = await asyncio.get_running_loop().run_in_executor(
                         self.personaplex_manager.step_executor,
-                        self._streaming_session.step,
+                        session.step,
                         chunk_to_process
                     )
                     
@@ -292,8 +298,10 @@ class VoiceLoop:
                         self._streaming_audio_buffer.append(out_audio)
 
                 if is_speech and self._speaking and self._policy == "hard":
-                    self._playback_interrupt.set()
-                    await self._set_activity("interrupted", "hard interruption requested")
+                    # Only set+log once per actual interrupt (debounce: guard on is_set())
+                    if not self._playback_interrupt.is_set():
+                        self._playback_interrupt.set()
+                        await self._set_activity("interrupted", "hard interruption requested")
 
                 if is_speech:
                     chunks.append(chunk)

@@ -1,8 +1,11 @@
 """
 quantize.py — Per-channel int8 quantization for PersonaPlex LM weights.
 
-Reduces model VRAM from ~14 GB (fp16) to ~8–10 GB (8-bit) or ~5–7 GB (4-bit),
-freeing headroom for CUDA graphs and reducing memory-bandwidth pressure.
+NOTE (empirical): On PersonaPlex/Moshi the VRAM reduction is ~0.2 GB rather than
+the theoretical ~6-9 GB, because Moshi's large weight matrices live in fused-ops
+layers (gating/linear_in/linear_out/out_proj) that must be skipped to avoid
+breaking the model. Only small residual layers get replaced. A bitsandbytes- or
+GGUF-based approach would be needed for meaningful VRAM reduction.
 
 Usage:
     from quantize import quantize_model_after_load

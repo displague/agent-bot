@@ -473,10 +473,14 @@ class PersonaPlexManager:
                 self.lm = loaders.get_moshi_lm(moshi_weight, device=self.device, cpu_offload=self.cpu_offload)
                 self.lm.eval()
                 # Optional quantization — reduces VRAM from ~14 GB to ~8-10 GB (8bit) or ~5-7 GB (4bit)
+                # NOTE: Empirically only ~0.2 GB is freed on PersonaPlex because Moshi's large
+                # weight matrices live in fused-ops layers (gating/linear_in/linear_out/out_proj)
+                # that must be skipped. Use --quantize only for experimentation until a bitsandbytes-
+                # or GGUF-based approach is implemented.
                 quantize_type = getattr(_config, "PERSONAPLEX_QUANTIZE", "")
                 if quantize_type and quantize_type not in ("none", "None"):
                     from quantize import quantize_model_after_load
-                    self._status(f"PersonaPlexManager: applying {quantize_type} quantization…")
+                    self._status(f"PersonaPlexManager: applying {quantize_type} quantization (note: VRAM reduction may be minimal for Moshi architecture)…")
                     self.lm = quantize_model_after_load(self.lm, quantize_type, device=self.device)
                 elif not self.cpu_offload:
                     self.lm.to(self.device)
