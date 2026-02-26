@@ -458,6 +458,11 @@ if __name__ == "__main__":
         default=None,
         help="Quantize PersonaPlex LM weights (8bit ~8-10 GB, 4bit ~5-7 GB)",
     )
+    parser.add_argument(
+        "--headless",
+        action="store_true",
+        help="Run without TUI, using stdin/stdout for interaction",
+    )
     args_parsed = parser.parse_args()
 
     if args_parsed.reset_logs:
@@ -484,12 +489,14 @@ if __name__ == "__main__":
 
         curses_ok, curses_mod, reason = _check_curses_available()
 
-        if ui_mode == "simple":
+        if args_parsed.headless or ui_mode == "simple":
             asyncio.run(
                 main(
                     None,
                     renderer_name="simple",
-                    renderer_reason="forced by AGENTBOT_UI_MODE=simple",
+                    renderer_reason="headless flag"
+                    if args_parsed.headless
+                    else "forced by AGENTBOT_UI_MODE=simple",
                     dev_mode=dev_mode,
                 )
             )
