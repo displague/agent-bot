@@ -486,12 +486,24 @@ class PersonaPlexManager:
                 
                 # If quantizing, load on CPU first to avoid OOM during the initial weights load.
                 # quantize_model_after_load will handle the move to GPU after conversion.
-                target_load_device = "cpu" if (quantize_type and quantize_type not in ("none", "None")) else self.device
+                is_quantizing = (quantize_type and quantize_type not in ("none", "None"))
+                target_load_device = "cpu" if is_quantizing else self.device
                 
-                self.lm = loaders.get_moshi_lm(moshi_weight, device=target_load_device, cpu_offload=self.cpu_offload)
+                # Temporarily force default device to CPU to be absolutely sure no 
+                # implicit allocations happen on GPU during the loaders.get_moshi_lm call.
+                try:
+                    old_default_device = torch.get_default_device() if hasattr(torch, "get_default_device") else None
+                    if is_quantizing:
+                        torch.set_default_device("cpu")
+                    
+                    self.lm = loaders.get_moshi_lm(moshi_weight, device=target_load_device, cpu_offload=self.cpu_offload)
+                finally:
+                    if is_quantizing and old_default_device:
+                        torch.set_default_device(old_default_device)
+
                 self.lm.eval()
                 
-                if quantize_type and quantize_type not in ("none", "None"):
+                if is_quantizing:
                     from quantize import quantize_model_after_load
                     self._status(f"PersonaPlexManager: applying {quantize_type} quantization (on CPU then moving to {self.device})...")
                     self.lm = quantize_model_after_load(self.lm, quantize_type, device=self.device)
