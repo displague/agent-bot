@@ -32,6 +32,8 @@ Use this skill when the app shows voice loop running but user sees no response o
 - **Session Start Cost**: `PersonaPlexStreamingSession.start()` should use `_restore_primed_state()` (instant) not `step_system_prompts` (~46s). After each TTS call, session is invalidated (`_streaming_session = None`) and recreated on the next voice frame — the fast restore path is critical for responsiveness.
 - **Chunked vs Continuous Playback**: Playing each 80ms PCM frame as a separate `play_wav_file_interruptible` call causes ~380ms gaps between syllables. Pre-concatenate all TTS frames into a single buffer and play once via `say_audio()`.
 - **Teacher-Forced TTS**: Call `step(text_token=tok, input_tokens=sine_frame)` WITHOUT `moshi_tokens` — depformer samples audio autoregressively. Passing `moshi_tokens=zero_frame` forces silent PAD tokens (see issue #X). The first 1-2 frames are quiet; amplitude appears from frame 3+.
+- **Greedy Decoding = Stuck Output**: LMGen initialized with `top_k=1, top_k_text=1` produces fully deterministic output. Combined with `_restore_primed_state()` restoring the same KV-cache state every call, the model generates the identical audio every time (always the startup greeting). MLX reference uses `audio_topk=250, text_topk=25`. Match these defaults.
+- **Mimi Routing (Bug A+B)**: In `step()`/`infer()`/`infer_stream()`, decode with `mimi.decode(tokens[:,1:9])` (NOT `other_mimi.decode`). Also call `_ = other_mimi.decode(...)` AND `_ = other_mimi.encode(chunk)` as discards for state sync every frame — skipping state sync causes codec drift and degraded audio.
 
 ## Triage Flow
 
