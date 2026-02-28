@@ -5,7 +5,11 @@ import subprocess
 import textwrap
 from datetime import datetime
 
-from config import VOICE_AUTO_START_ON_LAUNCH, VOICE_CAPTURE_KEY_LABEL
+from config import (
+    PERSONAPLEX_VOICE_PROMPT,
+    VOICE_AUTO_START_ON_LAUNCH,
+    VOICE_CAPTURE_KEY_LABEL,
+)
 from config import LLM_DIAG_TIMEOUT_SECONDS
 from process_utils import force_exit_now
 from smoke_test_runner import (
@@ -356,7 +360,7 @@ class SimpleRenderer:
             if pm and vl:
 
                 async def _do_hear():
-                    stream = pm.hear_stream(text, pm._primed_for or "")
+                    stream = pm.hear_stream(text, PERSONAPLEX_VOICE_PROMPT)
                     await vl.say_stream(stream)
 
                 asyncio.create_task(_do_hear())
@@ -377,7 +381,7 @@ class SimpleRenderer:
 
                 async def _do_hear_file():
                     stream = pm.hear_stream(
-                        "", pm._primed_for or "", user_wav_path=path
+                        "", PERSONAPLEX_VOICE_PROMPT, user_wav_path=path
                     )
                     await vl.say_stream(stream)
 

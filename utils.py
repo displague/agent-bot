@@ -331,6 +331,7 @@ class PersonaPlexManager:
         # each call can restore it in milliseconds instead of re-running setup.
         self._lm_primed_state = None
         self._optimizations_applied = False
+        self._loaded = False
         # Dedicated executor for sequential, low-jitter inference
         from concurrent.futures import ThreadPoolExecutor
 
@@ -537,7 +538,7 @@ class PersonaPlexManager:
         global MimiModel, LMGen, loaders, sentencepiece, moshi_run_inference
         import torch
 
-        if self.mimi is not None:
+        if self._loaded:
             return
 
         # Apply optimizations BEFORE importing anything from moshi
@@ -566,13 +567,16 @@ class PersonaPlexManager:
                 return torch.cuda.memory_allocated() / (1024**3)
             return 0.0
 
-        vram_before = get_vram()
-        self._status("PersonaPlexManager: starting in-process model load...")
-
         quantize_type = getattr(_config, "PERSONAPLEX_QUANTIZE", "")
         is_quantizing = quantize_type and quantize_type not in ("none", "None")
 
         with self._lock:
+            if self._loaded:
+                return
+
+            vram_before = get_vram()
+            self._status("PersonaPlexManager: starting in-process model load...")
+
             from huggingface_hub import hf_hub_download
 
             # If quantizing, isolate GPU completely during the heavy weight load
@@ -619,10 +623,8 @@ class PersonaPlexManager:
                 target_repo = self.repo
                 target_filename = loaders.MOSHI_NAME
                 if quantize_type == "4bit":
-                    target_repo = "brianmatzelle/personaplex-7b-v1-bnb-4bit"
-                    target_filename = "model_bnb_4bit.pt"
                     self._status(
-                        f"PersonaPlexManager: using pre-quantized model from {target_repo}"
+                        "PersonaPlexManager: using base safetensors + post-load 4bit quantization."
                     )
 
                 moshi_weight = hf_hub_download(target_repo, target_filename)
@@ -640,19 +642,31 @@ class PersonaPlexManager:
 
                     # Convert to safetensors if it's a .pt file, then load to CPU
                     if not moshi_weight.endswith(".safetensors"):
-                        self._status(
-                            "PersonaPlexManager: converting .pt to .safetensors for CPU load..."
-                        )
-                        temp_sd = torch.load(moshi_weight, map_location="cpu")
-                        if "model" in temp_sd:
-                            temp_sd = temp_sd["model"]
-                        from safetensors.torch import save_file
-
                         st_path = moshi_weight + ".safetensors"
-                        save_file(temp_sd, st_path)
-                        moshi_weight = st_path
-                        del temp_sd
-                        gc.collect()
+                        if os.path.exists(st_path):
+                            self._status(
+                                "PersonaPlexManager: using cached .safetensors conversion."
+                            )
+                            moshi_weight = st_path
+                        else:
+                            self._status(
+                                "PersonaPlexManager: converting .pt to .safetensors for CPU load..."
+                            )
+                            temp_sd = torch.load(moshi_weight, map_location="cpu")
+                            if "model" in temp_sd:
+                                temp_sd = temp_sd["model"]
+                            from safetensors.torch import save_file
+
+                            # Use a process-unique path to avoid Windows file-mapping
+                            # collisions when multiple app instances are active.
+                            unique_st_path = os.path.join(
+                                tempfile.gettempdir(),
+                                f"{Path(moshi_weight).stem}-{os.getpid()}-{int(time.time() * 1000)}.safetensors",
+                            )
+                            save_file(temp_sd, unique_st_path)
+                            moshi_weight = unique_st_path
+                            del temp_sd
+                            gc.collect()
 
                     state_dict = st_load_file(moshi_weight, device="cpu")
 
@@ -759,9 +773,8 @@ class PersonaPlexManager:
                     warm_err,
                 )
                 self._primed = False
-            except Exception as e:
-                logger.exception("PersonaPlexManager: failed to load models: %s", e)
-                raise
+
+            self._loaded = True
 
     def create_session(
         self, text_prompt: str, voice_prompt_path: str
@@ -773,7 +786,7 @@ class PersonaPlexManager:
         """Return detailed status of the manager and models."""
         with self._lock:
             return {
-                "loaded": self.mimi is not None,
+                "loaded": self._loaded,
                 "device": self.device,
                 "cpu_offload": self.cpu_offload,
                 "optimize_strategy": PERSONAPLEX_OPTIMIZE,
@@ -1079,6 +1092,10 @@ class PersonaPlexManager:
             4.0  # seconds of silence after speech — gives model time to respond
         )
         _LEADING_SILENCE_AMP = 0.02  # skip leading output frames that are nearly silent
+
+        self._apply_optimizations()
+        self.load()
+
         _sample_rate = int(self.mimi.sample_rate)
 
         with _tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as _f:
@@ -1100,9 +1117,6 @@ class PersonaPlexManager:
             )
             full_input = np.concatenate([input_data, trailing])
             user_speech_samples = len(input_data)
-
-            self._apply_optimizations()
-            self.load()
 
             final_voice_prompt = _ensure_voice_prompt_exists(voice_prompt_path)
 
@@ -1361,9 +1375,18 @@ class DebugServer:
         self._server = None
 
     async def start(self):
-        self._server = await asyncio.start_server(
-            self._handle_client, self.host, self.port
-        )
+        try:
+            self._server = await asyncio.start_server(
+                self._handle_client, self.host, self.port
+            )
+        except OSError as e:
+            if getattr(e, "winerror", None) == 10048 or getattr(e, "errno", None) == 10048:
+                logger.warning(
+                    "DebugServer: port %s already in use; skipping socket server startup.",
+                    self.port,
+                )
+                return
+            raise
         logger.info(f"DebugServer: listening on {self.host}:{self.port}")
         async with self._server:
             await self._server.serve_forever()

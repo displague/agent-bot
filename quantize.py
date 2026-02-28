@@ -98,14 +98,25 @@ class _BNBLinear4bit(nn.Module):
         self.out_features = linear.out_features
 
         # We initialize the bnb layer
-        self.bnb_layer = bnb.nn.Linear4bit(
-            self.in_features,
-            self.out_features,
-            bias=linear.bias is not None,
-            compute_dtype=torch.bfloat16,
-            quant_type="nf4",
-            double_quant=True,
-        )
+        try:
+            # Older/newer bitsandbytes builds use different kwarg names.
+            self.bnb_layer = bnb.nn.Linear4bit(
+                self.in_features,
+                self.out_features,
+                bias=linear.bias is not None,
+                compute_dtype=torch.bfloat16,
+                quant_type="nf4",
+                compress_statistics=True,
+            )
+        except TypeError:
+            self.bnb_layer = bnb.nn.Linear4bit(
+                self.in_features,
+                self.out_features,
+                bias=linear.bias is not None,
+                compute_dtype=torch.bfloat16,
+                quant_type="nf4",
+                double_quant=True,
+            )
         # Load weights into the bnb layer
         self.bnb_layer.weight.data.copy_(linear.weight.data)
         if linear.bias is not None:
