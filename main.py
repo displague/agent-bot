@@ -187,6 +187,8 @@ async def main(stdscr=None, renderer_name="auto", renderer_reason="", dev_mode=F
         startup_lines.append(log_warning)
     _show_startup_status(stdscr, startup_lines)
 
+    ui_renderer = None
+
     def _status_callback(message: str):
         state["loading_stage"] = message
         # If this message is a completion (contains 'loaded' or 'Model ready'),
@@ -201,7 +203,13 @@ async def main(stdscr=None, renderer_name="auto", renderer_reason="", dev_mode=F
                 startup_lines.append(f"Stage: {message}")
         else:
             startup_lines.append(f"Stage: {message}")
-        _show_startup_status(stdscr, startup_lines)
+
+        if ui_renderer is None:
+            _show_startup_status(stdscr, startup_lines)
+
+        # Also push to UI debug log if renderer is available
+        if ui_renderer and hasattr(ui_renderer, "debug_queue"):
+            ui_renderer.debug_queue.put(message)
 
     index_manager = IndexManager()
     interaction_log_manager = InteractionLogManager()
@@ -268,6 +276,16 @@ async def main(stdscr=None, renderer_name="auto", renderer_reason="", dev_mode=F
             voice_loop=voice_loop,
         )
 
+    # Debug Server (Hot Socket) - Start immediately to detect duplicate instances
+    # and allow monitoring during the slow loading phase.
+    debug_server = DebugServer(command_handler=ui_renderer.handle_command, state=state)
+    debug_task = runtime_manager.register_task(asyncio.create_task(debug_server.start()))
+
+    # Push early startup lines to the renderer's debug queue now that it is initialized.
+    if hasattr(ui_renderer, "debug_queue"):
+        for line in startup_lines:
+            ui_renderer.debug_queue.put(line)
+
     ui_task = runtime_manager.register_task(asyncio.create_task(ui_renderer.start()))
 
     llama_manager = None
@@ -322,15 +340,13 @@ async def main(stdscr=None, renderer_name="auto", renderer_reason="", dev_mode=F
         state=state,
     )
 
-    # Debug Server (Hot Socket)
-    debug_server = DebugServer(command_handler=ui_renderer.handle_command, state=state)
+    # Debug Server (Hot Socket) already started early in main()
 
     background_tasks = [
         runtime_manager.register_task(asyncio.create_task(event_scheduler.start())),
         runtime_manager.register_task(
             asyncio.create_task(interaction_processor.start())
         ),
-        runtime_manager.register_task(asyncio.create_task(debug_server.start())),
         runtime_manager.register_task(asyncio.create_task(vram_monitor())),
     ]
     if not dev_mode:
@@ -395,12 +411,12 @@ async def main(stdscr=None, renderer_name="auto", renderer_reason="", dev_mode=F
             logger.warning("Event scheduler shutdown timed out")
 
         # Cancel all background tasks
-        for task in background_tasks:
+        for task in background_tasks + [debug_task]:
             task.cancel()
 
         if background_tasks:
             done, pending = await asyncio.wait(
-                background_tasks, timeout=SHUTDOWN_GRACE_SECONDS
+                background_tasks + [debug_task], timeout=SHUTDOWN_GRACE_SECONDS
             )
             for task in pending:
                 task.cancel()
@@ -442,6 +458,11 @@ if __name__ == "__main__":
         default=None,
         help="Quantize PersonaPlex LM weights (8bit ~8-10 GB, 4bit ~5-7 GB)",
     )
+    parser.add_argument(
+        "--headless",
+        action="store_true",
+        help="Run without TUI, using stdin/stdout for interaction",
+    )
     args_parsed = parser.parse_args()
 
     if args_parsed.reset_logs:
@@ -468,12 +489,14 @@ if __name__ == "__main__":
 
         curses_ok, curses_mod, reason = _check_curses_available()
 
-        if ui_mode == "simple":
+        if args_parsed.headless or ui_mode == "simple":
             asyncio.run(
                 main(
                     None,
                     renderer_name="simple",
-                    renderer_reason="forced by AGENTBOT_UI_MODE=simple",
+                    renderer_reason="headless flag"
+                    if args_parsed.headless
+                    else "forced by AGENTBOT_UI_MODE=simple",
                     dev_mode=dev_mode,
                 )
             )
